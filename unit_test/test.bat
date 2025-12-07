@@ -130,7 +130,8 @@ if errorlevel 1 (
 )
 
 echo   Decompressing...
-%EXE% -d output\test.%ALGO% output\restored.txt %ALGO% %FLAGS%
+if exist output\restored rmdir /s /q output\restored
+%EXE% -d output\test.%ALGO% output\restored %ALGO% %FLAGS%
 if errorlevel 1 (
     echo   FAILED: Decompression failed
     set /a FAIL_COUNT+=1
@@ -138,7 +139,7 @@ if errorlevel 1 (
 )
 
 echo   Verifying...
-fc /b sample.txt output\restored.txt > nul
+fc /b sample.txt output\restored\sample.txt > nul
 if errorlevel 1 (
     echo   FAILED: Files do not match
     set /a FAIL_COUNT+=1
@@ -165,7 +166,8 @@ if errorlevel 1 (
 )
 
 echo   Decompressing with CPU...
-%EXE% -d output\test.%ALGO% output\restored.txt %ALGO% --cpu
+if exist output\restored rmdir /s /q output\restored
+%EXE% -d output\test.%ALGO% output\restored %ALGO% --cpu
 if errorlevel 1 (
     echo   FAILED: CPU Decompression failed
     set /a FAIL_COUNT+=1
@@ -173,7 +175,7 @@ if errorlevel 1 (
 )
 
 echo   Verifying...
-fc /b sample.txt output\restored.txt > nul
+fc /b sample.txt output\restored\sample.txt > nul
 if errorlevel 1 (
     echo   FAILED: Files do not match
     set /a FAIL_COUNT+=1

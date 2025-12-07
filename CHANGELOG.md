@@ -2,6 +2,209 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [2.2.0] - 2025-12-07
+
+### Added
+- **Algorithm Auto-Detection** for Decompression and Listing Modes
+  - Algorithm parameter is now **optional** for `-d` (decompress) and `-l` (list) modes
+  - Tool automatically reads algorithm ID from GPU batched format file headers
+  - Works for LZ4, Snappy, and Zstd in both GPU and CPU modes
+  - Example: `nvcomp_cli -d archive.zstd output/` (no algorithm needed!)
+  - Example: `nvcomp_cli -l archive.lz4` (no algorithm needed!)
+  
+- **New Helper Function**: `detectAlgorithmFromFile()`
+  - Reads batched format header from file
+  - Extracts algorithm ID without loading entire file
+  - Returns ALGO_UNKNOWN for non-batched format files
+  
+- **Enhanced User Experience**:
+  - Updated CLI usage message with clear indication of optional parameters
+  - Better error messages when algorithm is required (compression mode)
+  - Auto-detection status messages ("Auto-detected algorithm: lz4")
+
+### Changed
+- **CLI Argument Parsing**:
+  - Algorithm parameter changed from required to optional for `-d` and `-l` modes
+  - Compression mode (`-c`) still requires algorithm parameter (as expected)
+  - Defaults to ALGO_LZ4 fallback if auto-detection fails
+  
+- **Decompression Functions**:
+  - `decompressGPUBatched()`: Now auto-detects algorithm before processing
+  - `decompressCPU()`: Now auto-detects algorithm before processing
+  - `listCompressedArchive()`: Now auto-detects algorithm before processing
+  - `decompressBatchedFormat()`: Updated log message to show "Auto-detected algorithm"
+
+### Testing
+- **6 New Auto-Detection Tests** added to folder test suite:
+  - 3 listing tests (LZ4, Snappy, Zstd) without algorithm parameter
+  - 3 decompression tests (LZ4 GPU, Zstd GPU, LZ4 CPU) without algorithm parameter
+  - All tests verify successful auto-detection and correct operation
+  
+- **Total Test Coverage**: 29 tests (15 single-file + 14 folder/archive)
+  - Single-file tests: 15 (unchanged)
+  - Folder compression: 4 tests
+  - Archive listing: 3 tests
+  - Round-trip test: 1 test
+  - **Auto-detection: 6 tests (NEW)**
+
+### Documentation
+- Updated README.md with algorithm auto-detection examples
+- Updated usage documentation to show optional parameters
+- Added dedicated "Algorithm Auto-Detection" section
+- Updated all example commands to show auto-detection usage
+- Updated test coverage numbers (8 → 14 folder tests, 23 → 29 total)
+
+### Benefits
+- **Simplified User Experience**: No need to remember or specify algorithm for decompression
+- **Backward Compatible**: Explicit algorithm parameter still works as before
+- **Cross-Platform**: Works on both Windows and Linux
+- **Error Prevention**: Prevents mismatches between file format and specified algorithm
+
+---
+
+## [2.1.1] - 2025-12-07
+
+### Fixed
+- **GPU Batched Decompression**: Implemented GPU batched decompression for LZ4, Snappy, Zstd
+  - Added custom batched compression format with magic number `NVBC`
+  - Stores chunk metadata (uncompressed size, chunk count, chunk sizes)
+  - Enables GPU decompression with proper chunk boundary handling
+  - Cross-compatible: CPU can still decompress GPU-compressed files (but slower)
+  - **Original Issue Fixed**: "Error: Zstd CPU decompression failed" when listing or decompressing GPU-compressed archives
+  
+- **Decompression Mode Selection**:
+  - Removed forced CPU decompression for cross-compatible algorithms
+  - GPU decompression now used by default when GPU is available
+  - Automatic format detection (batched format vs CPU format)
+  - `--cpu` flag still works to force CPU decompression
+
+- **List Mode Format Detection**:
+  - Automatically detects batched format vs standard format
+  - Uses appropriate decompression method based on file format
+  - Works with both GPU and CPU compressed files
+
+### Added
+- **Algorithm Auto-Detection** for GPU batched format files
+  - Reads algorithm from file header automatically
+  - No need to specify algorithm when listing or decompressing GPU batched files
+  - Works for LZ4, Snappy, and Zstd
+  - Example: `nvcomp_cli -l archive.zstd` (no algorithm parameter needed)
+
+- **Folder Compression Test Suite** (`test_folder.bat`, `test_folder.sh`)
+  - 8 comprehensive tests for folder compression and archive operations
+  - Tests for GPU and CPU compression of folders (LZ4, Zstd)
+  - Tests for archive listing functionality
+  - Dedicated round-trip test that reproduces and validates fix for original zstd issue
+  - All tests pass successfully
+
+### Changed
+- **Batched Compression Output**:
+  - Now includes metadata header with chunk information
+  - Slightly larger files (metadata overhead ~32 bytes + 8 bytes per chunk)
+  - Enables much faster GPU decompression
+  
+- **Performance**:
+  - GPU decompression now works for Zstd, LZ4, Snappy (was forcing CPU before)
+  - Significant speed improvement for decompression on GPU
+
+### Technical Details
+- **Batched Header Structure**:
+  - Magic: 0x4E564243 ("NVBC")
+  - Version: 1
+  - Uncompressed size, chunk count, chunk size, algorithm ID
+  - Followed by array of chunk sizes
+  - Then compressed chunk data
+
+- **Format Detection**:
+  - Checks magic number to determine format
+  - Batched format → GPU decompression (or CPU if --cpu flag)
+  - Standard format → CPU decompression
+
+### Testing
+- **Original Issue Test**: Round-trip test validates the fix for GPU zstd decompression failure
+  - Step 1: Compress folder with GPU zstd
+  - Step 2: List archive (was failing: "Error: Zstd CPU decompression failed")
+  - Step 3: Decompress archive (was also failing)
+  - Step 4: Verify extracted files
+  - ✅ All steps now pass successfully
+
+### Breaking Changes
+- Files compressed with previous version (2.1.0) cannot be decompressed with this version
+- Recompress your archives with the new version for GPU decompression support
+
+---
+
+## [2.1.0] - 2025-12-07
+
+### Added
+- **Folder/Directory Compression**
+  - Recursive directory traversal for compressing entire folder structures
+  - Custom archive format with magic number `NVAR` (NvCOMP ARchive)
+  - Archive header stores file count and version information
+  - Each file stored with relative path and data
+  - Supports both single files and directories as input
+
+- **Archive Listing Mode**
+  - New `-l` flag to list contents of compressed archives
+  - Shows file paths and sizes without extraction
+  - Formatted output with human-readable sizes (B, KB, MB, GB)
+  - Works with all compression algorithms
+
+- **Cross-Platform Path Handling**
+  - Automatic normalization of path separators (Windows `\` → Unix `/`)
+  - Paths stored in archives use forward slashes for portability
+  - Archives created on Windows can be extracted on Linux and vice versa
+  - Relative path preservation for consistent extraction
+
+- **Enhanced CLI**
+  - Updated argument parsing to support new modes
+  - Output path for decompression is now a directory (not a file)
+  - Improved usage documentation and examples
+  - Better error messages for directory operations
+
+### Changed
+- **Compression Functions**
+  - `compressCPU()`, `compressGPUBatched()`, `compressGPUManager()` now handle both files and directories
+  - All inputs are archived before compression (even single files for consistency)
+  - Refactored compression/decompression into separate data processing functions
+
+- **Decompression Functions**
+  - `decompressCPU()`, `decompressGPUManager()` now extract archives to directories
+  - Output parameter changed from file path to directory path
+  - Automatic directory creation during extraction
+
+- **File I/O**
+  - Added helper functions: `createArchive()`, `extractArchive()`, `listArchive()`
+  - Added path utilities: `normalizePath()`, `getRelativePath()`, `collectFiles()`
+  - Uses C++17 filesystem API (`std::filesystem`)
+
+### Technical Details
+- **Archive Format**:
+  - Header: 16 bytes (magic, version, file count, reserved)
+  - File Entry: 12 bytes (path length, file size)
+  - Data: path string + file contents
+  - No compression in archive layer (archive → compress → output)
+
+- **Cross-Platform Compatibility**:
+  - Forward slashes used universally in archive
+  - Automatic conversion on both Windows and Linux
+  - Parent directories created automatically during extraction
+
+### Documentation
+- Updated README.md with folder compression examples
+- Added archive format specification
+- Added cross-platform usage examples
+- Updated troubleshooting section with path-related issues
+- Added manual testing instructions for folders
+
+### Known Limitations
+- Entire archive must fit in memory (no streaming for folders)
+- File permissions and attributes not preserved
+- Symbolic links not supported
+- Empty directories not stored in archive
+
+---
+
 ## [2.0.0] - 2025-12-06
 
 ### Breaking Changes

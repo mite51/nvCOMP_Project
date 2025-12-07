@@ -61,7 +61,8 @@ run_test() {
     
     # Decompress
     echo "  Decompressing..."
-    if ! $EXE -d output/test.$ALGO output/restored.txt $ALGO $FLAGS; then
+    rm -rf output/restored
+    if ! $EXE -d output/test.$ALGO output/restored $ALGO $FLAGS; then
         echo "  FAILED: Decompression failed"
         ((FAIL_COUNT++))
         return 1
@@ -69,7 +70,7 @@ run_test() {
     
     # Verify
     echo "  Verifying..."
-    if ! cmp -s sample.txt output/restored.txt; then
+    if ! cmp -s sample.txt output/restored/sample.txt; then
         echo "  FAILED: Files do not match"
         ((FAIL_COUNT++))
         return 1
@@ -100,7 +101,8 @@ run_cross_test() {
     
     # Decompress with CPU
     echo "  Decompressing with CPU..."
-    if ! $EXE -d output/test.$ALGO output/restored.txt $ALGO --cpu; then
+    rm -rf output/restored
+    if ! $EXE -d output/test.$ALGO output/restored $ALGO --cpu; then
         echo "  FAILED: CPU Decompression failed"
         ((FAIL_COUNT++))
         return 1
@@ -108,7 +110,7 @@ run_cross_test() {
     
     # Verify
     echo "  Verifying..."
-    if ! cmp -s sample.txt output/restored.txt; then
+    if ! cmp -s sample.txt output/restored/sample.txt; then
         echo "  FAILED: Files do not match"
         ((FAIL_COUNT++))
         return 1

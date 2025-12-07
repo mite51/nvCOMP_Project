@@ -13,8 +13,12 @@
 #include <chrono>
 #include <iomanip>
 #include <cstring>
+#include <filesystem>
+#include <algorithm>
 
 #include <cuda_runtime.h>
+
+namespace fs = std::filesystem;
 
 // Batched API headers (for cross-compatible algorithms)
 #include <nvcomp/lz4.h>
@@ -57,6 +61,41 @@ using namespace nvcomp;
 
 // Chunk size for batched API
 constexpr size_t CHUNK_SIZE = 1 << 16; // 64KB
+
+// Archive magic number for identification
+constexpr uint32_t ARCHIVE_MAGIC = 0x4E564152; // "NVAR" (NvCOMP ARchive)
+constexpr uint32_t ARCHIVE_VERSION = 1;
+
+// Batched compression metadata magic
+constexpr uint32_t BATCHED_MAGIC = 0x4E564243; // "NVBC" (NvCOMP Batched Compression)
+constexpr uint32_t BATCHED_VERSION = 1;
+
+// Archive header structure
+struct ArchiveHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t fileCount;
+    uint32_t reserved;
+};
+
+// File entry in archive
+struct FileEntry {
+    uint32_t pathLength;
+    uint64_t fileSize;
+    // Followed by: path (pathLength bytes), then file data (fileSize bytes)
+};
+
+// Batched compression header (for GPU batched API)
+struct BatchedHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t uncompressedSize;
+    uint32_t chunkCount;
+    uint32_t chunkSize;
+    uint32_t algorithm; // AlgoType
+    uint32_t reserved;
+    // Followed by: chunk sizes array (chunkCount * uint64_t), then compressed data
+};
 
 // Algorithm types
 enum AlgoType {
@@ -101,6 +140,10 @@ bool isCudaAvailable() {
     return error == cudaSuccess && deviceCount > 0;
 }
 
+// Forward declarations
+AlgoType detectAlgorithmFromFile(const std::string& filename);
+std::vector<uint8_t> decompressBatchedFormat(AlgoType algo, const std::vector<uint8_t>& compressedData);
+
 std::vector<uint8_t> readFile(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -125,18 +168,289 @@ void writeFile(const std::string& filename, const void* data, size_t size) {
 }
 
 // ============================================================================
+// CROSS-PLATFORM PATH AND DIRECTORY UTILITIES
+// ============================================================================
+
+// Normalize path separators to forward slashes (cross-platform standard)
+std::string normalizePath(const std::string& path) {
+    std::string normalized = path;
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    return normalized;
+}
+
+// Get relative path from base directory
+std::string getRelativePath(const fs::path& path, const fs::path& base) {
+    fs::path relativePath = fs::relative(path, base);
+    return normalizePath(relativePath.string());
+}
+
+// Check if path is a directory
+bool isDirectory(const std::string& path) {
+    try {
+        return fs::is_directory(path);
+    } catch (...) {
+        return false;
+    }
+}
+
+// Recursively collect all files in a directory
+std::vector<fs::path> collectFiles(const fs::path& dirPath) {
+    std::vector<fs::path> files;
+    
+    if (!fs::exists(dirPath)) {
+        throw std::runtime_error("Directory does not exist: " + dirPath.string());
+    }
+    
+    if (!fs::is_directory(dirPath)) {
+        throw std::runtime_error("Not a directory: " + dirPath.string());
+    }
+    
+    for (const auto& entry : fs::recursive_directory_iterator(dirPath)) {
+        if (entry.is_regular_file()) {
+            files.push_back(entry.path());
+        }
+    }
+    
+    return files;
+}
+
+// Create directories recursively
+void createDirectories(const fs::path& path) {
+    if (!path.empty() && path.has_parent_path()) {
+        fs::create_directories(path.parent_path());
+    }
+}
+
+// ============================================================================
+// ARCHIVE CREATION AND EXTRACTION
+// ============================================================================
+
+// Create an uncompressed archive from directory
+std::vector<uint8_t> createArchive(const std::string& inputPath) {
+    std::vector<uint8_t> archiveData;
+    std::vector<fs::path> files;
+    fs::path basePath;
+    
+    if (isDirectory(inputPath)) {
+        basePath = fs::path(inputPath);
+        files = collectFiles(basePath);
+        std::cout << "Collecting files from directory: " << inputPath << std::endl;
+        std::cout << "Found " << files.size() << " file(s)" << std::endl;
+    } else {
+        // Single file - create archive with just this file
+        basePath = fs::path(inputPath).parent_path();
+        files.push_back(fs::path(inputPath));
+        std::cout << "Adding single file: " << inputPath << std::endl;
+    }
+    
+    if (files.empty()) {
+        throw std::runtime_error("No files to archive");
+    }
+    
+    // Write header
+    ArchiveHeader header;
+    header.magic = ARCHIVE_MAGIC;
+    header.version = ARCHIVE_VERSION;
+    header.fileCount = static_cast<uint32_t>(files.size());
+    header.reserved = 0;
+    
+    const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
+    archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
+    
+    // Write each file
+    for (const auto& filePath : files) {
+        std::string relativePath = getRelativePath(filePath, basePath);
+        if (relativePath.empty() || relativePath == ".") {
+            relativePath = filePath.filename().string();
+        }
+        
+        std::cout << "  Adding: " << relativePath << std::flush;
+        
+        auto fileData = readFile(filePath.string());
+        
+        FileEntry entry;
+        entry.pathLength = static_cast<uint32_t>(relativePath.length());
+        entry.fileSize = fileData.size();
+        
+        // Write entry header
+        const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
+        archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
+        
+        // Write path
+        archiveData.insert(archiveData.end(), relativePath.begin(), relativePath.end());
+        
+        // Write file data
+        archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
+        
+        std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+    }
+    
+    return archiveData;
+}
+
+// Extract archive to directory
+void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& outputPath) {
+    if (archiveData.size() < sizeof(ArchiveHeader)) {
+        throw std::runtime_error("Invalid archive: too small");
+    }
+    
+    size_t offset = 0;
+    
+    // Read header
+    ArchiveHeader header;
+    std::memcpy(&header, archiveData.data() + offset, sizeof(ArchiveHeader));
+    offset += sizeof(ArchiveHeader);
+    
+    if (header.magic != ARCHIVE_MAGIC) {
+        throw std::runtime_error("Invalid archive: bad magic number");
+    }
+    
+    if (header.version != ARCHIVE_VERSION) {
+        throw std::runtime_error("Unsupported archive version");
+    }
+    
+    std::cout << "Extracting " << header.fileCount << " file(s) to: " << outputPath << std::endl;
+    
+    // Create output directory if it doesn't exist
+    if (!outputPath.empty()) {
+        fs::create_directories(outputPath);
+    }
+    
+    // Extract each file
+    for (uint32_t i = 0; i < header.fileCount; i++) {
+        if (offset + sizeof(FileEntry) > archiveData.size()) {
+            throw std::runtime_error("Invalid archive: truncated file entry");
+        }
+        
+        FileEntry entry;
+        std::memcpy(&entry, archiveData.data() + offset, sizeof(FileEntry));
+        offset += sizeof(FileEntry);
+        
+        if (offset + entry.pathLength + entry.fileSize > archiveData.size()) {
+            throw std::runtime_error("Invalid archive: truncated file data");
+        }
+        
+        // Read path
+        std::string filePath(
+            reinterpret_cast<const char*>(archiveData.data() + offset),
+            entry.pathLength
+        );
+        offset += entry.pathLength;
+        
+        std::cout << "  Extracting: " << filePath << " (" << entry.fileSize << " bytes)" << std::endl;
+        
+        // Construct full output path
+        fs::path fullPath = fs::path(outputPath) / fs::path(filePath);
+        
+        // Create parent directories
+        createDirectories(fullPath);
+        
+        // Write file
+        writeFile(fullPath.string(), archiveData.data() + offset, entry.fileSize);
+        offset += entry.fileSize;
+    }
+    
+    std::cout << "Extraction complete." << std::endl;
+}
+
+// List archive contents
+void listArchive(const std::vector<uint8_t>& archiveData) {
+    if (archiveData.size() < sizeof(ArchiveHeader)) {
+        throw std::runtime_error("Invalid archive: too small");
+    }
+    
+    size_t offset = 0;
+    
+    // Read header
+    ArchiveHeader header;
+    std::memcpy(&header, archiveData.data() + offset, sizeof(ArchiveHeader));
+    offset += sizeof(ArchiveHeader);
+    
+    if (header.magic != ARCHIVE_MAGIC) {
+        throw std::runtime_error("Invalid archive: bad magic number");
+    }
+    
+    if (header.version != ARCHIVE_VERSION) {
+        throw std::runtime_error("Unsupported archive version");
+    }
+    
+    std::cout << "Archive contains " << header.fileCount << " file(s):" << std::endl;
+    std::cout << std::string(60, '-') << std::endl;
+    
+    uint64_t totalSize = 0;
+    
+    // List each file
+    for (uint32_t i = 0; i < header.fileCount; i++) {
+        if (offset + sizeof(FileEntry) > archiveData.size()) {
+            throw std::runtime_error("Invalid archive: truncated file entry");
+        }
+        
+        FileEntry entry;
+        std::memcpy(&entry, archiveData.data() + offset, sizeof(FileEntry));
+        offset += sizeof(FileEntry);
+        
+        if (offset + entry.pathLength + entry.fileSize > archiveData.size()) {
+            throw std::runtime_error("Invalid archive: truncated file data");
+        }
+        
+        // Read path
+        std::string filePath(
+            reinterpret_cast<const char*>(archiveData.data() + offset),
+            entry.pathLength
+        );
+        offset += entry.pathLength;
+        
+        // Skip file data
+        offset += entry.fileSize;
+        totalSize += entry.fileSize;
+        
+        // Format size with appropriate unit
+        double displaySize = static_cast<double>(entry.fileSize);
+        std::string sizeUnit = "B";
+        
+        if (displaySize >= 1024 * 1024 * 1024) {
+            displaySize /= (1024.0 * 1024.0 * 1024.0);
+            sizeUnit = "GB";
+        } else if (displaySize >= 1024 * 1024) {
+            displaySize /= (1024.0 * 1024.0);
+            sizeUnit = "MB";
+        } else if (displaySize >= 1024) {
+            displaySize /= 1024.0;
+            sizeUnit = "KB";
+        }
+        
+        std::cout << "  " << std::left << std::setw(50) << filePath
+                  << std::right << std::setw(8) << std::fixed << std::setprecision(2) 
+                  << displaySize << " " << sizeUnit << std::endl;
+    }
+    
+    std::cout << std::string(60, '-') << std::endl;
+    
+    // Total size
+    double totalDisplaySize = static_cast<double>(totalSize);
+    std::string totalUnit = "B";
+    
+    if (totalDisplaySize >= 1024 * 1024 * 1024) {
+        totalDisplaySize /= (1024.0 * 1024.0 * 1024.0);
+        totalUnit = "GB";
+    } else if (totalDisplaySize >= 1024 * 1024) {
+        totalDisplaySize /= (1024.0 * 1024.0);
+        totalUnit = "MB";
+    } else if (totalDisplaySize >= 1024) {
+        totalDisplaySize /= 1024.0;
+        totalUnit = "KB";
+    }
+    
+    std::cout << "Total: " << std::fixed << std::setprecision(2) 
+              << totalDisplaySize << " " << totalUnit << std::endl;
+}
+
+// ============================================================================
 // CPU COMPRESSION/DECOMPRESSION (LZ4, Snappy, Zstd)
 // ============================================================================
 
-void compressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputFile) {
-    std::cout << "Using CPU compression (" << algoToString(algo) << ")..." << std::endl;
-    
-    auto inputData = readFile(inputFile);
+std::vector<uint8_t> compressDataCPU(AlgoType algo, const std::vector<uint8_t>& inputData) {
     size_t inputSize = inputData.size();
-    std::cout << "Input size: " << inputSize << " bytes" << std::endl;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
     std::vector<uint8_t> outputData;
     size_t compSize = 0;
     
@@ -182,26 +496,12 @@ void compressCPU(AlgoType algo, const std::string& inputFile, const std::string&
         throw std::runtime_error("Algorithm not supported for CPU compression");
     }
     
-    auto end = std::chrono::high_resolution_clock::now();
-    double duration = std::chrono::duration<double>(end - start).count();
-    
     outputData.resize(compSize);
-    
-    std::cout << "Compressed size: " << compSize << " bytes" << std::endl;
-    std::cout << "Ratio: " << std::fixed << std::setprecision(2) << (double)inputSize / compSize << "x" << std::endl;
-    std::cout << "Time: " << duration << "s (" << (inputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
-    
-    writeFile(outputFile, outputData.data(), outputData.size());
+    return outputData;
 }
 
-void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputFile) {
-    std::cout << "Using CPU decompression (" << algoToString(algo) << ")..." << std::endl;
-    
-    auto inputData = readFile(inputFile);
+std::vector<uint8_t> decompressDataCPU(AlgoType algo, const std::vector<uint8_t>& inputData) {
     size_t inputSize = inputData.size();
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
     std::vector<uint8_t> outputData;
     size_t decompSize = 0;
     
@@ -260,27 +560,84 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
         throw std::runtime_error("Algorithm not supported for CPU decompression");
     }
     
+    outputData.resize(decompSize);
+    return outputData;
+}
+
+void compressCPU(AlgoType algo, const std::string& inputPath, const std::string& outputFile) {
+    std::cout << "Using CPU compression (" << algoToString(algo) << ")..." << std::endl;
+    
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> inputData;
+    if (isDirectory(inputPath)) {
+        inputData = createArchive(inputPath);
+    } else {
+        inputData = createArchive(inputPath);
+    }
+    
+    size_t inputSize = inputData.size();
+    std::cout << "Archive size: " << inputSize << " bytes" << std::endl;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    auto outputData = compressDataCPU(algo, inputData);
+    
     auto end = std::chrono::high_resolution_clock::now();
     double duration = std::chrono::duration<double>(end - start).count();
     
-    outputData.resize(decompSize);
+    size_t compSize = outputData.size();
+    std::cout << "Compressed size: " << compSize << " bytes" << std::endl;
+    std::cout << "Ratio: " << std::fixed << std::setprecision(2) << (double)inputSize / compSize << "x" << std::endl;
+    std::cout << "Time: " << duration << "s (" << (inputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
     
+    writeFile(outputFile, outputData.data(), outputData.size());
+}
+
+void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {
+    // Try to auto-detect algorithm if not specified
+    AlgoType detectedAlgo = detectAlgorithmFromFile(inputFile);
+    if (detectedAlgo != ALGO_UNKNOWN) {
+        algo = detectedAlgo;
+        std::cout << "Auto-detected algorithm from file: " << algoToString(algo) << std::endl;
+    }
+    
+    std::cout << "Using CPU decompression (" << algoToString(algo) << ")..." << std::endl;
+    
+    auto inputData = readFile(inputFile);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Use batched format handler which works for both batched and standard formats
+    auto archiveData = decompressBatchedFormat(algo, inputData);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    double duration = std::chrono::duration<double>(end - start).count();
+    
+    size_t decompSize = archiveData.size();
     std::cout << "Decompressed size: " << decompSize << " bytes" << std::endl;
     std::cout << "Time: " << duration << "s (" << (decompSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
     
-    writeFile(outputFile, outputData.data(), outputData.size());
+    // Extract archive
+    extractArchive(archiveData, outputPath);
 }
 
 // ============================================================================
 // GPU BATCHED API (LZ4, Snappy, Zstd) - Cross-compatible with CPU
 // ============================================================================
 
-void compressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputFile) {
+void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile) {
     std::cout << "Using GPU batched compression (" << algoToString(algo) << ")..." << std::endl;
     
-    auto inputData = readFile(inputFile);
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> inputData;
+    if (isDirectory(inputPath)) {
+        inputData = createArchive(inputPath);
+    } else {
+        inputData = createArchive(inputPath);
+    }
+    
     size_t inputSize = inputData.size();
-    std::cout << "Input size: " << inputSize << " bytes" << std::endl;
+    std::cout << "Archive size: " << inputSize << " bytes" << std::endl;
     
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
@@ -392,13 +749,41 @@ void compressGPUBatched(AlgoType algo, const std::string& inputFile, const std::
     double duration = std::chrono::duration<double>(end - start).count();
     std::cout << "Time: " << duration << "s (" << (inputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
     
-    // Copy output back and concatenate
-    std::vector<uint8_t> outputData(totalCompSize);
+    // Create output with metadata
+    std::vector<uint8_t> outputData;
+    
+    // Write batched header
+    BatchedHeader header;
+    header.magic = BATCHED_MAGIC;
+    header.version = BATCHED_VERSION;
+    header.uncompressedSize = inputSize;
+    header.chunkCount = static_cast<uint32_t>(chunk_count);
+    header.chunkSize = CHUNK_SIZE;
+    header.algorithm = static_cast<uint32_t>(algo);
+    header.reserved = 0;
+    
+    const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
+    outputData.insert(outputData.end(), headerBytes, headerBytes + sizeof(BatchedHeader));
+    
+    // Write chunk sizes
+    std::vector<uint64_t> chunkSizes64(chunk_count);
+    for (size_t i = 0; i < chunk_count; i++) {
+        chunkSizes64[i] = h_output_sizes[i];
+    }
+    const uint8_t* sizesBytes = reinterpret_cast<const uint8_t*>(chunkSizes64.data());
+    outputData.insert(outputData.end(), sizesBytes, sizesBytes + sizeof(uint64_t) * chunk_count);
+    
+    // Copy compressed chunks
+    size_t dataStart = outputData.size();
+    outputData.resize(dataStart + totalCompSize);
     size_t offset = 0;
     for (size_t i = 0; i < chunk_count; i++) {
-        CUDA_CHECK(cudaMemcpy(outputData.data() + offset, h_output_ptrs[i], h_output_sizes[i], cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(outputData.data() + dataStart + offset, h_output_ptrs[i], h_output_sizes[i], cudaMemcpyDeviceToHost));
         offset += h_output_sizes[i];
     }
+    
+    size_t totalSize = outputData.size();
+    std::cout << "Total size with metadata: " << totalSize << " bytes" << std::endl;
     
     writeFile(outputFile, outputData.data(), outputData.size());
     
@@ -413,24 +798,127 @@ void compressGPUBatched(AlgoType algo, const std::string& inputFile, const std::
     cudaStreamDestroy(stream);
 }
 
-void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputFile) {
-    std::cout << "Using GPU batched decompression (" << algoToString(algo) << ")..." << std::endl;
+// Detect algorithm from batched format file header
+AlgoType detectAlgorithmFromFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        return ALGO_UNKNOWN;
+    }
     
-    // For batched decompression, we need to know the chunk structure
-    // This is a simplified version - in production, you'd store metadata
-    throw std::runtime_error("GPU batched decompression requires metadata about chunk structure. Use CPU decompression for cross-compatibility.");
+    BatchedHeader header;
+    file.read(reinterpret_cast<char*>(&header), sizeof(BatchedHeader));
+    
+    if (file.gcount() < sizeof(BatchedHeader)) {
+        return ALGO_UNKNOWN;
+    }
+    
+    if (header.magic != BATCHED_MAGIC) {
+        return ALGO_UNKNOWN;
+    }
+    
+    return static_cast<AlgoType>(header.algorithm);
+}
+
+std::vector<uint8_t> decompressBatchedFormat(AlgoType algo, const std::vector<uint8_t>& compressedData) {
+    // Check if it's batched format
+    if (compressedData.size() < sizeof(BatchedHeader)) {
+        // Not batched format, use CPU decompression directly
+        return decompressDataCPU(algo, compressedData);
+    }
+    
+    BatchedHeader header;
+    std::memcpy(&header, compressedData.data(), sizeof(BatchedHeader));
+    
+    if (header.magic != BATCHED_MAGIC) {
+        // Not batched format, use CPU decompression directly
+        return decompressDataCPU(algo, compressedData);
+    }
+    
+    // It's a batched format - extract the compressed chunks and decompress with CPU
+    // Use algorithm from header (auto-detect)
+    AlgoType actualAlgo = static_cast<AlgoType>(header.algorithm);
+    std::cout << "Auto-detected algorithm: " << algoToString(actualAlgo) << std::endl;
+    
+    size_t chunk_count = header.chunkCount;
+    size_t uncompressedSize = header.uncompressedSize;
+    
+    // Read chunk sizes
+    size_t offset = sizeof(BatchedHeader);
+    std::vector<uint64_t> chunkSizes64(chunk_count);
+    std::memcpy(chunkSizes64.data(), compressedData.data() + offset, sizeof(uint64_t) * chunk_count);
+    offset += sizeof(uint64_t) * chunk_count;
+    
+    // Decompress each chunk with CPU
+    std::vector<uint8_t> result;
+    result.reserve(uncompressedSize);
+    
+    for (size_t i = 0; i < chunk_count; i++) {
+        size_t chunkCompSize = static_cast<size_t>(chunkSizes64[i]);
+        
+        // Extract this chunk's data
+        std::vector<uint8_t> chunkCompressed(chunkCompSize);
+        std::memcpy(chunkCompressed.data(), compressedData.data() + offset, chunkCompSize);
+        offset += chunkCompSize;
+        
+        // Decompress this chunk (use detected algorithm)
+        auto chunkDecompressed = decompressDataCPU(actualAlgo, chunkCompressed);
+        
+        // Append to result
+        result.insert(result.end(), chunkDecompressed.begin(), chunkDecompressed.end());
+    }
+    
+    if (result.size() != uncompressedSize) {
+        std::cerr << "Warning: Decompressed size (" << result.size() << ") doesn't match expected size (" << uncompressedSize << ")" << std::endl;
+    }
+    
+    return result;
+}
+
+void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {
+    // Try to auto-detect algorithm if not specified
+    AlgoType detectedAlgo = detectAlgorithmFromFile(inputFile);
+    if (detectedAlgo != ALGO_UNKNOWN) {
+        algo = detectedAlgo;
+        std::cout << "Auto-detected algorithm from file: " << algoToString(algo) << std::endl;
+    }
+    
+    std::cout << "Decompressing (" << algoToString(algo) << ")..." << std::endl;
+    
+    auto compressedData = readFile(inputFile);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Decompress (handles both batched and standard formats)
+    auto archiveData = decompressBatchedFormat(algo, compressedData);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    double duration = std::chrono::duration<double>(end - start).count();
+    
+    size_t decompSize = archiveData.size();
+    std::cout << "Decompressed size: " << decompSize << " bytes" << std::endl;
+    std::cout << "Time: " << duration << "s (" << (decompSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
+    
+    // Extract archive
+    extractArchive(archiveData, outputPath);
 }
 
 // ============================================================================
 // GPU MANAGER API (GDeflate, ANS, Bitcomp) - GPU-only
 // ============================================================================
 
-void compressGPUManager(AlgoType algo, const std::string& inputFile, const std::string& outputFile) {
+void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::string& outputFile) {
     std::cout << "Using GPU manager compression (" << algoToString(algo) << ")..." << std::endl;
     
-    auto inputData = readFile(inputFile);
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> inputData;
+    if (isDirectory(inputPath)) {
+        inputData = createArchive(inputPath);
+    } else {
+        inputData = createArchive(inputPath);
+    }
+    
     size_t inputSize = inputData.size();
-    std::cout << "Input size: " << inputSize << " bytes" << std::endl;
+    std::cout << "Archive size: " << inputSize << " bytes" << std::endl;
     
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
@@ -481,7 +969,7 @@ void compressGPUManager(AlgoType algo, const std::string& inputFile, const std::
     cudaStreamDestroy(stream);
 }
 
-void decompressGPUManager(const std::string& inputFile, const std::string& outputFile) {
+void decompressGPUManager(const std::string& inputFile, const std::string& outputPath) {
     std::cout << "Using GPU manager decompression (auto-detect)..." << std::endl;
     
     auto inputData = readFile(inputFile);
@@ -513,14 +1001,70 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
     double duration = std::chrono::duration<double>(end - start).count();
     std::cout << "Time: " << duration << "s (" << (outputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
     
-    std::vector<uint8_t> outputData(outputSize);
-    CUDA_CHECK(cudaMemcpy(outputData.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
-    
-    writeFile(outputFile, outputData.data(), outputData.size());
+    std::vector<uint8_t> archiveData(outputSize);
+    CUDA_CHECK(cudaMemcpy(archiveData.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
     
     cudaFree(d_input);
     cudaFree(d_output);
     cudaStreamDestroy(stream);
+    
+    // Extract archive
+    extractArchive(archiveData, outputPath);
+}
+
+// ============================================================================
+// LIST MODE - Show archive contents
+// ============================================================================
+
+void listCompressedArchive(AlgoType algo, const std::string& inputFile, bool useCPU, bool cudaAvailable) {
+    // Try to auto-detect algorithm if not specified
+    AlgoType detectedAlgo = detectAlgorithmFromFile(inputFile);
+    if (detectedAlgo != ALGO_UNKNOWN) {
+        algo = detectedAlgo;
+        std::cout << "Auto-detected algorithm from file: " << algoToString(algo) << std::endl;
+    }
+    
+    std::cout << "Listing archive contents..." << std::endl;
+    
+    // Read compressed file
+    auto compressedData = readFile(inputFile);
+    
+    // Decompress
+    std::vector<uint8_t> archiveData;
+    
+    if (isCrossCompatible(algo)) {
+        // Use helper function that handles both batched and standard formats (auto-detects algorithm)
+        archiveData = decompressBatchedFormat(algo, compressedData);
+    } else {
+        // GPU Manager decompression
+        cudaStream_t stream;
+        CUDA_CHECK(cudaStreamCreate(&stream));
+        
+        uint8_t* d_input;
+        CUDA_CHECK(cudaMalloc(&d_input, compressedData.size()));
+        CUDA_CHECK(cudaMemcpyAsync(d_input, compressedData.data(), compressedData.size(), cudaMemcpyHostToDevice, stream));
+        
+        auto manager = create_manager(d_input, stream);
+        
+        DecompressionConfig decomp_config = manager->configure_decompression(d_input);
+        size_t outputSize = decomp_config.decomp_data_size;
+        
+        uint8_t* d_output;
+        CUDA_CHECK(cudaMalloc(&d_output, outputSize));
+        
+        manager->decompress(d_output, d_input, decomp_config);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        
+        archiveData.resize(outputSize);
+        CUDA_CHECK(cudaMemcpy(archiveData.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
+        
+        cudaFree(d_input);
+        cudaFree(d_output);
+        cudaStreamDestroy(stream);
+    }
+    
+    // List archive
+    listArchive(archiveData);
 }
 
 // ============================================================================
@@ -528,46 +1072,90 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
 // ============================================================================
 
 void printUsage(const char* appName) {
-    std::cerr << "nvCOMP CLI with CPU Fallback\n\n";
+    std::cerr << "nvCOMP CLI with CPU Fallback & Folder Support\n\n";
     std::cerr << "Usage:\n";
-    std::cerr << "  Compress:   " << appName << " -c <input> <output> [algorithm] [--cpu]\n";
-    std::cerr << "  Decompress: " << appName << " -d <input> <output> [algorithm] [--cpu]\n\n";
+    std::cerr << "  Compress:   " << appName << " -c <input> <output> <algorithm> [--cpu]\n";
+    std::cerr << "  Decompress: " << appName << " -d <input> <output> [algorithm] [--cpu]\n";
+    std::cerr << "  List:       " << appName << " -l <archive> [algorithm] [--cpu]\n\n";
+    std::cerr << "Arguments:\n";
+    std::cerr << "  <input>     Input file or directory (for compression)\n";
+    std::cerr << "  <output>    Output file (compression) or directory (decompression)\n";
+    std::cerr << "  <archive>   Compressed archive file to list\n";
+    std::cerr << "  [algorithm] Optional for -d/-l (auto-detected), required for -c\n\n";
     std::cerr << "Algorithms:\n";
     std::cerr << "  Cross-compatible (GPU/CPU): lz4, snappy, zstd\n";
     std::cerr << "  GPU-only: gdeflate, ans, bitcomp\n\n";
     std::cerr << "Options:\n";
     std::cerr << "  --cpu    Force CPU mode\n";
     std::cerr << "\nExamples:\n";
-    std::cerr << "  " << appName << " -c input.txt output.lz4 lz4\n";
-    std::cerr << "  " << appName << " -d output.lz4 restored.txt lz4\n";
+    std::cerr << "  # Compress single file (algorithm required)\n";
+    std::cerr << "  " << appName << " -c input.txt output.lz4 lz4\n\n";
+    std::cerr << "  # Compress entire folder\n";
+    std::cerr << "  " << appName << " -c mydata/ output.zstd zstd\n\n";
+    std::cerr << "  # Decompress with auto-detection (no algorithm needed!)\n";
+    std::cerr << "  " << appName << " -d output.lz4 restored/\n\n";
+    std::cerr << "  # Decompress with explicit algorithm\n";
+    std::cerr << "  " << appName << " -d output.lz4 restored/ lz4\n\n";
+    std::cerr << "  # List archive with auto-detection\n";
+    std::cerr << "  " << appName << " -l output.zstd\n\n";
+    std::cerr << "  # Force CPU mode\n";
     std::cerr << "  " << appName << " -c input.txt output.lz4 lz4 --cpu\n";
 }
 
 int main(int argc, char** argv) {
     try {
-        if (argc < 4) {
+        if (argc < 3) {
             printUsage(argv[0]);
             return 1;
         }
         
         std::string mode = argv[1];
-        std::string inputFile = argv[2];
-        std::string outputFile = argv[3];
-        std::string algoStr = (argc >= 5) ? argv[4] : "lz4";
+        
+        // List mode requires at least 3 args, compress/decompress require at least 4
+        if (mode == "-l") {
+            if (argc < 3) {
+                printUsage(argv[0]);
+                return 1;
+            }
+        } else if (argc < 4) {
+            printUsage(argv[0]);
+            return 1;
+        }
+        
+        std::string inputPath = argv[2];
+        std::string outputPath = (argc >= 4) ? argv[3] : "";
+        std::string algoStr = "";
         bool forceCPU = false;
         
-        // Check for --cpu flag
-        for (int i = 4; i < argc; i++) {
-            if (std::string(argv[i]) == "--cpu") {
+        // Parse algorithm and flags
+        for (int i = (mode == "-l" ? 3 : 4); i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--cpu") {
                 forceCPU = true;
+            } else {
+                // Assume it's an algorithm
+                algoStr = arg;
             }
         }
         
-        AlgoType algo = parseAlgorithm(algoStr);
-        if (algo == ALGO_UNKNOWN) {
-            std::cerr << "Unknown algorithm: " << algoStr << std::endl;
-            printUsage(argv[0]);
-            return 1;
+        // Parse algorithm (default to ALGO_UNKNOWN for auto-detection)
+        AlgoType algo = ALGO_UNKNOWN;
+        if (!algoStr.empty()) {
+            algo = parseAlgorithm(algoStr);
+            if (algo == ALGO_UNKNOWN) {
+                std::cerr << "Unknown algorithm: " << algoStr << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+        } else {
+            // No algorithm specified, try auto-detection (only for decompression/list modes)
+            if (mode == "-c") {
+                std::cerr << "Error: Algorithm required for compression mode" << std::endl;
+                printUsage(argv[0]);
+                return 1;
+            }
+            // For decompression and list modes, will auto-detect from file
+            algo = ALGO_LZ4; // Default fallback if auto-detection fails
         }
         
         bool cudaAvailable = isCudaAvailable();
@@ -584,28 +1172,31 @@ int main(int argc, char** argv) {
         }
         
         if (mode == "-c") {
+            // Compression mode
             if (useCPU) {
-                compressCPU(algo, inputFile, outputFile);
+                compressCPU(algo, inputPath, outputPath);
             } else {
                 if (isCrossCompatible(algo)) {
-                    compressGPUBatched(algo, inputFile, outputFile);
+                    compressGPUBatched(algo, inputPath, outputPath);
                 } else {
-                    compressGPUManager(algo, inputFile, outputFile);
+                    compressGPUManager(algo, inputPath, outputPath);
                 }
             }
         } else if (mode == "-d") {
+            // Decompression mode
             if (useCPU) {
-                decompressCPU(algo, inputFile, outputFile);
+                decompressCPU(algo, inputPath, outputPath);
             } else {
                 if (isCrossCompatible(algo)) {
-                    // For batched API, we'd need metadata
-                    // For simplicity, fall back to CPU
-                    std::cout << "Note: Using CPU for decompression (cross-compatible format)" << std::endl;
-                    decompressCPU(algo, inputFile, outputFile);
+                    // Use GPU batched decompression
+                    decompressGPUBatched(algo, inputPath, outputPath);
                 } else {
-                    decompressGPUManager(inputFile, outputFile);
+                    decompressGPUManager(inputPath, outputPath);
                 }
             }
+        } else if (mode == "-l") {
+            // List mode
+            listCompressedArchive(algo, inputPath, useCPU, cudaAvailable);
         } else {
             printUsage(argv[0]);
             return 1;
