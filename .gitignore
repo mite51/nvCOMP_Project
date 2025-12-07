@@ -1,3 +1,74 @@
-nvcomp-windows-x86_64-5.1.0.21_cuda13/
+# Build directories
 build/
 _deps/
+out/
+
+# Output directories
+output/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+!patch_lz4.cmake
+Makefile
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+*.sdf
+*.opensdf
+*.db
+*.opendb
+ipch/
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.out
+*.app
+
+# Compressed test files
+*.lz4
+*.snappy
+*.zstd
+*.gdeflate
+*.ans
+*.bitcomp
+output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Reference folder (examples, will be deleted)
+reference/
+
+# Test outputs
+unit_test/output/
+unit_test/restored.txt
+unit_test/*.lz4
+unit_test/*.snappy
+unit_test/*.zstd
+unit_test/*.gdeflate
+unit_test/*.ans
+unit_test/*.bitcomp
