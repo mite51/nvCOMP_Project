@@ -157,7 +157,7 @@ echo   Created %VOLUME_COUNT% volumes
 
 echo   Verifying volume naming (should be .vol001, .vol002, etc.)...
 if not exist output\volume_test_%ALGO%.vol001.%ALGO% (
-    echo   FAILED: First volume (.vol001) not found
+    echo   FAILED: First volume [.vol001] not found
     set /a FAIL_COUNT+=1
     goto :eof
 )
@@ -347,4 +347,5 @@ if not exist output\custom_vol_restored_%ALGO%\PineTools.com_files (
 echo   PASSED (Custom volume size worked correctly)
 set /a PASS_COUNT+=1
 goto :eof
+
 
