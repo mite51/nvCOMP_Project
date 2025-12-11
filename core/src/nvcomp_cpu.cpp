@@ -213,7 +213,7 @@ static std::vector<uint8_t> decompressDataCPU(AlgoType algo, const std::vector<u
     return outputData;
 }
 
-static std::vector<uint8_t> decompressBatchedFormat(AlgoType algo, const std::vector<uint8_t>& compressedData) {
+std::vector<uint8_t> decompressBatchedFormatCPU(AlgoType algo, const std::vector<uint8_t>& compressedData) {
     // Check if it's batched format
     if (compressedData.size() < sizeof(BatchedHeader)) {
         // Not batched format, use CPU decompression directly
@@ -431,7 +431,7 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
             std::cout << "Using CPU decompression (" << algoToString(algo) << ")..." << std::endl;
             
             auto start = std::chrono::high_resolution_clock::now();
-            auto archiveData = decompressBatchedFormat(algo, firstVolumeData);
+            auto archiveData = decompressBatchedFormatCPU(algo, firstVolumeData);
             auto end = std::chrono::high_resolution_clock::now();
             
             double duration = std::chrono::duration<double>(end - start).count();
@@ -478,7 +478,7 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
             }
             
             auto start = std::chrono::high_resolution_clock::now();
-            auto decompressed = decompressBatchedFormat(static_cast<AlgoType>(manifest.algorithm), volumeData);
+            auto decompressed = decompressBatchedFormatCPU(static_cast<AlgoType>(manifest.algorithm), volumeData);
             auto end = std::chrono::high_resolution_clock::now();
             
             double duration = std::chrono::duration<double>(end - start).count();
@@ -514,7 +514,7 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
     auto start = std::chrono::high_resolution_clock::now();
     
     // Use batched format handler which works for both batched and standard formats
-    auto archiveData = decompressBatchedFormat(algo, inputData);
+    auto archiveData = decompressBatchedFormatCPU(algo, inputData);
     
     auto end = std::chrono::high_resolution_clock::now();
     double duration = std::chrono::duration<double>(end - start).count();

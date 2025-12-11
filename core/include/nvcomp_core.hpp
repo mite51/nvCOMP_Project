@@ -149,6 +149,10 @@ NVCOMP_CORE_API void compressCPU(AlgoType algo, const std::string& inputPath,
 NVCOMP_CORE_API void decompressCPU(AlgoType algo, const std::string& inputFile, 
                                     const std::string& outputPath);
 
+// Helper function for decompressing batched format (used by GPU decompression too)
+NVCOMP_CORE_API std::vector<uint8_t> decompressBatchedFormatCPU(AlgoType algo, 
+                                                                  const std::vector<uint8_t>& compressedData);
+
 // ============================================================================
 // Algorithm Detection
 // ============================================================================

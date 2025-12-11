@@ -189,23 +189,16 @@ add_executable(nvcomp_cli main.cu)
 set_property(TARGET nvcomp_cli PROPERTY CUDA_ARCHITECTURES 75 80 86 89 90)
 
 # Include directories
+# The CLI only needs the core library C API headers
 target_include_directories(nvcomp_cli PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/core/include
-    ${lz4_SOURCE_DIR}/lib
-    ${snappy_SOURCE_DIR}
-    ${snappy_BINARY_DIR}
-    ${zstd_SOURCE_DIR}/lib
 )
 
 # Link libraries
-# NOTE: main.cu still contains old code (not refactored yet - that's Task 1.3)
-# So it needs direct access to compression libraries for now
+# The CLI is now a thin wrapper around the core library (Task 1.3)
+# All compression logic is handled by nvcomp_core
 target_link_libraries(nvcomp_cli PRIVATE 
     nvcomp_core
-    nvcomp::nvcomp
-    lz4_static
-    snappy
-    libzstd_static
 )
 
 # Windows-specific: Copy DLLs to output directory
