@@ -85,15 +85,17 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
         
         volumes.push_back(volume);
         
-        std::cout << "  Volume " << volumeIndex << ": " 
-                  << (volumeSize / (1024.0 * 1024.0)) << " MB" << std::endl;
+        // Show progress every 100 volumes or for the last volume
+        if (volumeIndex % 100 == 0 || remaining <= volumeSize) {
+            std::cout << "\r  Creating volumes... " << volumeIndex << " created" << std::flush;
+        }
         
         offset += volumeSize;
         remaining -= volumeSize;
         volumeIndex++;
     }
     
-    std::cout << "Created " << volumes.size() << " volume(s)" << std::endl;
+    std::cout << "\r  Created " << volumes.size() << " volume(s)" << std::string(20, ' ') << std::endl;
     
     return volumes;
 }
@@ -231,7 +233,6 @@ std::vector<uint8_t> decompressBatchedFormatCPU(AlgoType algo, const std::vector
     // It's a batched format - extract the compressed chunks and decompress with CPU
     // Use algorithm from header (auto-detect)
     AlgoType actualAlgo = static_cast<AlgoType>(header.algorithm);
-    std::cout << "Auto-detected algorithm: " << algoToString(actualAlgo) << std::endl;
     
     size_t chunk_count = header.chunkCount;
     size_t uncompressedSize = header.uncompressedSize;
@@ -465,8 +466,13 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
         fullArchive.reserve(manifest.totalUncompressedSize);
         double totalDuration = 0;
         
+        std::cout << "Decompressing " << volumeFiles.size() << " volume(s)..." << std::endl;
+        
         for (size_t i = 0; i < volumeFiles.size(); i++) {
-            std::cout << "\nDecompressing volume " << (i + 1) << "/" << volumeFiles.size() << "..." << std::endl;
+            // Show progress every 100 volumes or for the last volume
+            if ((i + 1) % 100 == 0 || i == volumeFiles.size() - 1) {
+                std::cout << "\r  Decompressing... " << (i + 1) << "/" << volumeFiles.size() << std::flush;
+            }
             
             auto volumeData = readFile(volumeFiles[i]);
             
@@ -484,10 +490,10 @@ void decompressCPU(AlgoType algo, const std::string& inputFile, const std::strin
             double duration = std::chrono::duration<double>(end - start).count();
             totalDuration += duration;
             
-            std::cout << "  Decompressed: " << decompressed.size() << " bytes in " << duration << "s" << std::endl;
-            
             fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
         }
+        
+        std::cout << std::endl; // New line after progress
         
         std::cout << "\n=== Decompression Summary ===" << std::endl;
         std::cout << "Total decompressed: " << fullArchive.size() << " bytes" << std::endl;

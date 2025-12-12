@@ -81,15 +81,17 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
         
         volumes.push_back(volume);
         
-        std::cout << "  Volume " << volumeIndex << ": " 
-                  << (volumeSize / (1024.0 * 1024.0)) << " MB" << std::endl;
+        // Show progress every 100 volumes or for the last volume
+        if (volumeIndex % 100 == 0 || remaining <= volumeSize) {
+            std::cout << "\r  Creating volumes... " << volumeIndex << " created" << std::flush;
+        }
         
         offset += volumeSize;
         remaining -= volumeSize;
         volumeIndex++;
     }
     
-    std::cout << "Created " << volumes.size() << " volume(s)" << std::endl;
+    std::cout << "\r  Created " << volumes.size() << " volume(s)" << std::string(20, ' ') << std::endl;
     
     return volumes;
 }
@@ -305,11 +307,243 @@ void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::
         return;
     }
     
-    // Multi-volume compression - implementation continues...
-    // (For brevity, the full multi-volume code would go here - similar to single volume but in a loop)
-    std::cout << "\nMulti-volume GPU batched compression not fully implemented in this extraction" << std::endl;
-    std::cout << "Falling back to single volume compression for now" << std::endl;
-    throw std::runtime_error("Multi-volume GPU batched compression needs full implementation");
+    // Multi-volume compression
+    std::cout << "\nCompressing " << volumes.size() << " volume(s)..." << std::endl;
+    
+    // Create volume manifest
+    VolumeManifest manifest;
+    manifest.magic = VOLUME_MAGIC;
+    manifest.version = VOLUME_VERSION;
+    manifest.volumeCount = static_cast<uint32_t>(volumes.size());
+    manifest.algorithm = static_cast<uint32_t>(algo);
+    manifest.volumeSize = maxVolumeSize;
+    manifest.totalUncompressedSize = totalSize;
+    manifest.reserved = 0;
+    
+    // Prepare metadata and compressed data storage
+    std::vector<VolumeMetadata> volumeMetadata(volumes.size());
+    std::vector<std::vector<uint8_t>> volumeCompressedData(volumes.size());
+    uint64_t uncompressedOffset = 0;
+    double totalDuration = 0;
+    size_t totalCompressedSize = 0;
+    
+    // Create CUDA stream for compression
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+    
+    // Compress each volume
+    for (size_t vol_idx = 0; vol_idx < volumes.size(); vol_idx++) {
+        // Show progress on single line
+        std::cout << "\r  Processing volume " << (vol_idx + 1) << "/" << volumes.size() << "..." << std::flush;
+        
+        size_t inputSize = volumes[vol_idx].size();
+        std::vector<uint8_t>& inputData = volumes[vol_idx];
+        
+        // Calculate chunks for this volume
+        size_t chunk_count = (inputSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        
+        // Prepare input chunks on host
+        std::vector<void*> h_input_ptrs(chunk_count);
+        std::vector<size_t> h_input_sizes(chunk_count);
+        
+        for (size_t i = 0; i < chunk_count; i++) {
+            size_t offset = i * CHUNK_SIZE;
+            h_input_sizes[i] = std::min(CHUNK_SIZE, inputSize - offset);
+        }
+        
+        // Allocate device memory for input
+        uint8_t* d_input_data;
+        CUDA_CHECK(cudaMalloc(&d_input_data, inputSize));
+        CUDA_CHECK(cudaMemcpy(d_input_data, inputData.data(), inputSize, cudaMemcpyHostToDevice));
+        
+        // Setup input pointers
+        void** d_input_ptrs;
+        size_t* d_input_sizes;
+        CUDA_CHECK(cudaMalloc(&d_input_ptrs, sizeof(void*) * chunk_count));
+        CUDA_CHECK(cudaMalloc(&d_input_sizes, sizeof(size_t) * chunk_count));
+        
+        for (size_t i = 0; i < chunk_count; i++) {
+            h_input_ptrs[i] = d_input_data + i * CHUNK_SIZE;
+        }
+        CUDA_CHECK(cudaMemcpy(d_input_ptrs, h_input_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_input_sizes, h_input_sizes.data(), sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice));
+        
+        // Get temp size and max output size
+        size_t temp_bytes;
+        size_t max_out_bytes;
+        
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetTempSizeAsync(
+                chunk_count, CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, inputSize));
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &max_out_bytes));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetTempSizeAsync(
+                chunk_count, CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, inputSize));
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &max_out_bytes));
+        } else if (algo == ALGO_ZSTD) {
+            NVCOMP_CHECK(nvcompBatchedZstdCompressGetTempSizeAsync(
+                chunk_count, CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &temp_bytes, inputSize));
+            NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &max_out_bytes));
+        }
+        
+        // Allocate temp and output
+        void* d_temp;
+        CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
+        
+        uint8_t* d_output_data;
+        CUDA_CHECK(cudaMalloc(&d_output_data, max_out_bytes * chunk_count));
+        
+        void** d_output_ptrs;
+        size_t* d_output_sizes;
+        CUDA_CHECK(cudaMalloc(&d_output_ptrs, sizeof(void*) * chunk_count));
+        CUDA_CHECK(cudaMalloc(&d_output_sizes, sizeof(size_t) * chunk_count));
+        
+        std::vector<void*> h_output_ptrs(chunk_count);
+        for (size_t i = 0; i < chunk_count; i++) {
+            h_output_ptrs[i] = d_output_data + i * max_out_bytes;
+        }
+        CUDA_CHECK(cudaMemcpy(d_output_ptrs, h_output_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
+        
+        auto start = std::chrono::high_resolution_clock::now();
+        
+        // Compress
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressAsync(
+                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
+                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
+                nvcompBatchedLZ4CompressDefaultOpts, nullptr, stream));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressAsync(
+                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
+                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
+                nvcompBatchedSnappyCompressDefaultOpts, nullptr, stream));
+        } else if (algo == ALGO_ZSTD) {
+            NVCOMP_CHECK(nvcompBatchedZstdCompressAsync(
+                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
+                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
+                nvcompBatchedZstdCompressDefaultOpts, nullptr, stream));
+        }
+        
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        auto end = std::chrono::high_resolution_clock::now();
+        
+        double duration = std::chrono::duration<double>(end - start).count();
+        totalDuration += duration;
+        
+        // Get output sizes
+        std::vector<size_t> h_output_sizes(chunk_count);
+        CUDA_CHECK(cudaMemcpy(h_output_sizes.data(), d_output_sizes, sizeof(size_t) * chunk_count, cudaMemcpyDeviceToHost));
+        
+        // Calculate total compressed size for this volume
+        size_t volumeCompSize = 0;
+        for (size_t i = 0; i < chunk_count; i++) {
+            volumeCompSize += h_output_sizes[i];
+        }
+        
+        // Create output with metadata for this volume
+        std::vector<uint8_t> outputData;
+        
+        // Write batched header
+        BatchedHeader header;
+        header.magic = BATCHED_MAGIC;
+        header.version = BATCHED_VERSION;
+        header.uncompressedSize = inputSize;
+        header.chunkCount = static_cast<uint32_t>(chunk_count);
+        header.chunkSize = CHUNK_SIZE;
+        header.algorithm = static_cast<uint32_t>(algo);
+        header.reserved = 0;
+        
+        const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
+        outputData.insert(outputData.end(), headerBytes, headerBytes + sizeof(BatchedHeader));
+        
+        // Write chunk sizes
+        std::vector<uint64_t> chunkSizes64(chunk_count);
+        for (size_t i = 0; i < chunk_count; i++) {
+            chunkSizes64[i] = h_output_sizes[i];
+        }
+        const uint8_t* sizesBytes = reinterpret_cast<const uint8_t*>(chunkSizes64.data());
+        outputData.insert(outputData.end(), sizesBytes, sizesBytes + sizeof(uint64_t) * chunk_count);
+        
+        // Copy compressed chunks
+        size_t dataStart = outputData.size();
+        outputData.resize(dataStart + volumeCompSize);
+        size_t offset = 0;
+        for (size_t i = 0; i < chunk_count; i++) {
+            CUDA_CHECK(cudaMemcpy(outputData.data() + dataStart + offset, h_output_ptrs[i], h_output_sizes[i], cudaMemcpyDeviceToHost));
+            offset += h_output_sizes[i];
+        }
+        
+        // Store compressed data for this volume
+        volumeCompressedData[vol_idx] = outputData;
+        
+        // Create volume metadata
+        VolumeMetadata meta;
+        meta.volumeIndex = vol_idx + 1;
+        meta.compressedSize = outputData.size();
+        meta.uncompressedOffset = uncompressedOffset;
+        meta.uncompressedSize = inputSize;
+        volumeMetadata[vol_idx] = meta;
+        
+        uncompressedOffset += inputSize;
+        totalCompressedSize += outputData.size();
+        
+        // Cleanup GPU memory for this volume
+        cudaFree(d_input_data);
+        cudaFree(d_input_ptrs);
+        cudaFree(d_input_sizes);
+        cudaFree(d_output_data);
+        cudaFree(d_output_ptrs);
+        cudaFree(d_output_sizes);
+        cudaFree(d_temp);
+    }
+    
+    std::cout << "\r  Processing volume " << volumes.size() << "/" << volumes.size() << "... Done!" << std::endl;
+    
+    // Destroy CUDA stream
+    cudaStreamDestroy(stream);
+    
+    // Write volume files
+    // First volume gets manifest + metadata + compressed data
+    std::string firstVolumeFile = generateVolumeFilename(outputFile, 1);
+    std::vector<uint8_t> firstVolumeOutput;
+    
+    // Add manifest header
+    const uint8_t* manifestBytes = reinterpret_cast<const uint8_t*>(&manifest);
+    firstVolumeOutput.insert(firstVolumeOutput.end(), manifestBytes, manifestBytes + sizeof(VolumeManifest));
+    
+    // Add volume metadata array
+    const uint8_t* metadataBytes = reinterpret_cast<const uint8_t*>(volumeMetadata.data());
+    firstVolumeOutput.insert(firstVolumeOutput.end(), metadataBytes, 
+                            metadataBytes + sizeof(VolumeMetadata) * volumeMetadata.size());
+    
+    // Add first volume compressed data
+    firstVolumeOutput.insert(firstVolumeOutput.end(), 
+                            volumeCompressedData[0].begin(), volumeCompressedData[0].end());
+    
+    writeFile(firstVolumeFile, firstVolumeOutput.data(), firstVolumeOutput.size());
+    
+    // Update first volume metadata with actual size (including manifest and metadata)
+    volumeMetadata[0].compressedSize = firstVolumeOutput.size();
+    totalCompressedSize = totalCompressedSize - volumeCompressedData[0].size() + firstVolumeOutput.size();
+    
+    // Write remaining volumes (just compressed data)
+    for (size_t i = 1; i < volumes.size(); i++) {
+        std::string volumeFile = generateVolumeFilename(outputFile, i + 1);
+        writeFile(volumeFile, volumeCompressedData[i].data(), volumeCompressedData[i].size());
+    }
+    
+    // Print summary
+    std::cout << "\n=== Multi-Volume Compression SUCCESSFUL ===" << std::endl;
+    std::cout << "Volumes created: " << volumes.size() << std::endl;
+    std::cout << "Total uncompressed: " << (totalSize / (1024.0 * 1024.0)) << " MB" << std::endl;
+    std::cout << "Total compressed: " << (totalCompressedSize / (1024.0 * 1024.0)) << " MB" << std::endl;
+    std::cout << "Overall ratio: " << std::fixed << std::setprecision(2) 
+              << (double)totalSize / totalCompressedSize << "x" << std::endl;
+    std::cout << "Total time: " << totalDuration << "s (" 
+              << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
 }
 
 // ============================================================================
@@ -387,8 +621,13 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
         fullArchive.reserve(manifest.totalUncompressedSize);
         double totalDuration = 0;
         
+        std::cout << "Decompressing " << volumeFiles.size() << " volume(s)..." << std::endl;
+        
         for (size_t i = 0; i < volumeFiles.size(); i++) {
-            std::cout << "\nDecompressing volume " << (i + 1) << "/" << volumeFiles.size() << "..." << std::endl;
+            // Show progress every 100 volumes or for the last volume
+            if ((i + 1) % 100 == 0 || i == volumeFiles.size() - 1) {
+                std::cout << "\r  Decompressing... " << (i + 1) << "/" << volumeFiles.size() << std::flush;
+            }
             
             auto volumeData = readFile(volumeFiles[i]);
             
@@ -406,10 +645,10 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             double duration = std::chrono::duration<double>(end - start).count();
             totalDuration += duration;
             
-            std::cout << "  Decompressed: " << decompressed.size() << " bytes in " << duration << "s" << std::endl;
-            
             fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
         }
+        
+        std::cout << std::endl; // New line after progress
         
         std::cout << "\n=== Decompression Summary ===" << std::endl;
         std::cout << "Total decompressed: " << fullArchive.size() << " bytes" << std::endl;
@@ -737,8 +976,13 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
         fullArchive.reserve(manifest.totalUncompressedSize);
         double totalDuration = 0;
         
+        std::cout << "Decompressing " << volumeFiles.size() << " volume(s)..." << std::endl;
+        
         for (size_t i = 0; i < volumeFiles.size(); i++) {
-            std::cout << "\nDecompressing volume " << (i + 1) << "/" << volumeFiles.size() << "..." << std::endl;
+            // Show progress every 100 volumes or for the last volume
+            if ((i + 1) % 100 == 0 || i == volumeFiles.size() - 1) {
+                std::cout << "\r  Decompressing... " << (i + 1) << "/" << volumeFiles.size() << std::flush;
+            }
             
             auto volumeData = readFile(volumeFiles[i]);
             
@@ -772,8 +1016,6 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
             double duration = std::chrono::duration<double>(end - start).count();
             totalDuration += duration;
             
-            std::cout << "  Decompressed: " << outputSize << " bytes in " << duration << "s" << std::endl;
-            
             std::vector<uint8_t> decompressed(outputSize);
             CUDA_CHECK(cudaMemcpy(decompressed.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
             
@@ -783,6 +1025,8 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
             cudaFree(d_output);
             cudaStreamDestroy(stream);
         }
+        
+        std::cout << std::endl; // New line after progress
         
         std::cout << "\n=== Decompression Summary ===" << std::endl;
         std::cout << "Total decompressed: " << fullArchive.size() << " bytes" << std::endl;
