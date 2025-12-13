@@ -182,14 +182,151 @@ find_package(nvcomp REQUIRED)
 
 if(BUILD_GUI)
     message(STATUS "Searching for Qt6...")
-    find_package(Qt6 COMPONENTS Core Widgets Gui REQUIRED)
+    
+    # Try to find Qt6 first (user may have it installed)
+    find_package(Qt6 COMPONENTS Core Widgets Gui Test QUIET)
+    
     if(Qt6_FOUND)
         message(STATUS "Qt6 found: ${Qt6_VERSION}")
         message(STATUS "  Qt6Core:    ${Qt6Core_DIR}")
         message(STATUS "  Qt6Widgets: ${Qt6Widgets_DIR}")
         message(STATUS "  Qt6Gui:     ${Qt6Gui_DIR}")
+        message(STATUS "  Qt6Test:    ${Qt6Test_DIR}")
     else()
-        message(FATAL_ERROR "Qt6 is required for GUI build but was not found")
+        message(STATUS "Qt6 not found. Attempting automatic installation...")
+        
+        # Check if Python is available
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(NOT Python3_FOUND)
+            message(FATAL_ERROR 
+                "Qt6 not found and Python3 is required for automatic installation.\n"
+                "\n"
+                "Please either:\n"
+                "1. Install Python 3.6+: https://www.python.org/downloads/\n"
+                "2. Install Qt6 manually: https://www.qt.io/download-open-source\n"
+                "3. Skip GUI build: cmake -B build -DBUILD_GUI=OFF\n"
+                "\n"
+                "See gui/INSTALL_QT6.md for detailed instructions.")
+        endif()
+        
+        # Install aqtinstall if not present
+        message(STATUS "Checking for aqtinstall...")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -m pip show aqtinstall
+            RESULT_VARIABLE AQTINSTALL_CHECK
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+        
+        if(NOT AQTINSTALL_CHECK EQUAL 0)
+            message(STATUS "Installing aqtinstall (Qt installer tool)...")
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE} -m pip install -q aqtinstall
+                RESULT_VARIABLE AQTINSTALL_INSTALL_RESULT
+                ERROR_QUIET
+            )
+            if(NOT AQTINSTALL_INSTALL_RESULT EQUAL 0)
+                message(FATAL_ERROR "Failed to install aqtinstall. Please install Qt6 manually.")
+            endif()
+            message(STATUS "aqtinstall installed successfully")
+        endif()
+        
+        # Determine Qt installation directory
+        set(QT_INSTALL_DIR "${CMAKE_BINARY_DIR}/qt6")
+        
+        # Determine platform and architecture
+        if(WIN32)
+            if(MSVC)
+                if(MSVC_VERSION GREATER_EQUAL 1930)
+                    # VS 2022 - try both 2022 and 2019 architectures
+                    set(QT_ARCH_LIST "win64_msvc2022_64" "win64_msvc2019_64")
+                    set(QT_VERSION_LIST "6.8.0" "6.7.3" "6.6.3")
+                elseif(MSVC_VERSION GREATER_EQUAL 1920)
+                    # VS 2019
+                    set(QT_ARCH_LIST "win64_msvc2019_64")
+                    set(QT_VERSION_LIST "6.7.3" "6.6.3" "6.5.3")
+                else()
+                    message(FATAL_ERROR "Unsupported MSVC version. Please use VS 2019 or later.")
+                endif()
+            else()
+                message(FATAL_ERROR "Only MSVC compiler is supported for Windows Qt builds.")
+            endif()
+            set(QT_OS "windows")
+        elseif(UNIX AND NOT APPLE)
+            set(QT_OS "linux")
+            set(QT_ARCH_LIST "gcc_64")
+            set(QT_VERSION_LIST "6.7.3" "6.6.3" "6.5.3")
+        else()
+            message(FATAL_ERROR "Unsupported platform for automatic Qt installation.")
+        endif()
+        
+        # Try to install Qt (try multiple versions and architectures)
+        set(QT_INSTALLED FALSE)
+        
+        foreach(QT_VERSION ${QT_VERSION_LIST})
+            if(QT_INSTALLED)
+                break()
+            endif()
+            
+            foreach(QT_ARCH ${QT_ARCH_LIST})
+                if(QT_INSTALLED)
+                    break()
+                endif()
+                
+                message(STATUS "Attempting to download Qt ${QT_VERSION} (${QT_ARCH})...")
+                message(STATUS "  This may take 5-10 minutes (~1-2 GB download)...")
+                message(STATUS "  Installation directory: ${QT_INSTALL_DIR}")
+                
+                execute_process(
+                    COMMAND ${Python3_EXECUTABLE} -m aqt install-qt 
+                        ${QT_OS} desktop ${QT_VERSION} ${QT_ARCH}
+                        -O ${QT_INSTALL_DIR}
+                    RESULT_VARIABLE QT_INSTALL_RESULT
+                    OUTPUT_VARIABLE QT_INSTALL_OUTPUT
+                    ERROR_VARIABLE QT_INSTALL_ERROR
+                    TIMEOUT 1800  # 30 minutes timeout
+                )
+                
+                if(QT_INSTALL_RESULT EQUAL 0)
+                    message(STATUS "Qt ${QT_VERSION} (${QT_ARCH}) installed successfully!")
+                    
+                    # Extract the directory name (remove win64_ prefix if present)
+                    string(REPLACE "win64_" "" QT_ARCH_DIR "${QT_ARCH}")
+                    
+                    # Set Qt6 path for find_package
+                    set(Qt6_DIR "${QT_INSTALL_DIR}/${QT_VERSION}/${QT_ARCH_DIR}/lib/cmake/Qt6")
+                    list(APPEND CMAKE_PREFIX_PATH "${QT_INSTALL_DIR}/${QT_VERSION}/${QT_ARCH_DIR}")
+                    
+                    message(STATUS "Qt6_DIR set to: ${Qt6_DIR}")
+                    set(QT_INSTALLED TRUE)
+                    set(INSTALLED_QT_VERSION ${QT_VERSION})
+                    set(INSTALLED_QT_ARCH ${QT_ARCH})
+                    break()
+                else()
+                    message(STATUS "  Failed to install Qt ${QT_VERSION} (${QT_ARCH})")
+                    message(STATUS "  Error: ${QT_INSTALL_ERROR}")
+                    message(STATUS "  Trying next option...")
+                endif()
+            endforeach()
+        endforeach()
+        
+        if(NOT QT_INSTALLED)
+            message(FATAL_ERROR 
+                "Failed to install Qt6 automatically after trying multiple versions.\n"
+                "\n"
+                "Manual installation options:\n"
+                "1. Qt Online Installer: https://www.qt.io/download-open-source\n"
+                "2. Manual aqtinstall command:\n"
+                "   python -m aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O C:/Qt\n"
+                "   Then: cmake -B build_gui -DBUILD_GUI=ON -DCMAKE_PREFIX_PATH=\"C:/Qt/6.8.0/msvc2022_64\"\n"
+                "3. See gui/INSTALL_QT6.md for detailed instructions\n"
+                "\n"
+                "Or skip GUI build: cmake -B build -DBUILD_GUI=OFF")
+        endif()
+        
+        # Now try to find Qt6 again
+        find_package(Qt6 COMPONENTS Core Widgets Gui Test REQUIRED)
+        message(STATUS "Qt6 ${INSTALLED_QT_VERSION} successfully configured!")
     endif()
 endif()
 

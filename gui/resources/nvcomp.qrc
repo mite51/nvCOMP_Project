@@ -1,0 +1,13 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>icons/nvcomp.png</file>
+        <file>icons/nvcomp_16.png</file>
+        <file>icons/nvcomp_32.png</file>
+        <file>icons/nvcomp_48.png</file>
+        <file>icons/nvcomp_64.png</file>
+        <file>icons/nvcomp_128.png</file>
+        <file>icons/nvcomp_256.png</file>
+    </qresource>
+</RCC>
+
