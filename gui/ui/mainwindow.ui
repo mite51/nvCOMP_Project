@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
-    <height>600</height>
+    <width>900</width>
+    <height>700</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -18,29 +18,455 @@
     <normaloff>:/icons/nvcomp.png</normaloff>:/icons/nvcomp.png</iconset>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QVBoxLayout" name="verticalLayout">
+   <layout class="QVBoxLayout" name="mainLayout">
+    <property name="spacing">
+     <number>12</number>
+    </property>
+    <property name="leftMargin">
+     <number>12</number>
+    </property>
+    <property name="topMargin">
+     <number>12</number>
+    </property>
+    <property name="rightMargin">
+     <number>12</number>
+    </property>
+    <property name="bottomMargin">
+     <number>12</number>
+    </property>
     <item>
-     <widget class="QLabel" name="labelWelcome">
-      <property name="text">
-       <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p align=&quot;center&quot;&gt;&lt;span style=&quot; font-size:16pt; font-weight:600;&quot;&gt;nvCOMP - GPU Accelerated Compression&lt;/span&gt;&lt;/p&gt;&lt;p align=&quot;center&quot;&gt;Drag and drop files here to compress or decompress&lt;/p&gt;&lt;p align=&quot;center&quot;&gt;&lt;span style=&quot; font-style:italic;&quot;&gt;(Compression features will be added in upcoming tasks)&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+     <!-- GPU Status Bar -->
+     <widget class="QFrame" name="gpuStatusFrame">
+      <property name="frameShape">
+       <enum>QFrame::StyledPanel</enum>
       </property>
-      <property name="alignment">
-       <set>Qt::AlignCenter</set>
+      <property name="frameShadow">
+       <enum>QFrame::Raised</enum>
       </property>
+      <layout class="QHBoxLayout" name="gpuStatusLayout">
+       <property name="spacing">
+        <number>8</number>
+       </property>
+       <property name="leftMargin">
+        <number>8</number>
+       </property>
+       <property name="topMargin">
+        <number>6</number>
+       </property>
+       <property name="rightMargin">
+        <number>8</number>
+       </property>
+       <property name="bottomMargin">
+        <number>6</number>
+       </property>
+       <item>
+        <widget class="QLabel" name="labelGpuIcon">
+         <property name="text">
+          <string>🎮</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignCenter</set>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="labelGpuStatus">
+         <property name="text">
+          <string>GPU Status: Initializing...</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="gpuStatusSpacer">
+         <property name="orientation">
+          <enum>Qt::Horizontal</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>40</width>
+           <height>20</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+       <item>
+        <widget name="checkBoxCpuMode" class="QCheckBox">
+         <property name="text">
+          <string>Force CPU Mode</string>
+         </property>
+         <property name="toolTip">
+          <string>Use CPU-only compression (slower but works without GPU)</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
      </widget>
     </item>
     <item>
-     <spacer name="verticalSpacer">
-      <property name="orientation">
-       <enum>Qt::Vertical</enum>
+     <!-- Input/Output Selection Group -->
+     <widget class="QGroupBox" name="groupBoxFiles">
+      <property name="title">
+       <string>Files</string>
       </property>
-      <property name="sizeHint" stdset="0">
-       <size>
-        <width>20</width>
-        <height>40</height>
-       </size>
+      <layout class="QVBoxLayout" name="filesLayout">
+       <property name="spacing">
+        <number>8</number>
+       </property>
+       <item>
+        <layout class="QHBoxLayout" name="fileHeaderLayout">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="labelDropHint">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-style:italic; color:#808080;&quot;&gt;📁 Drag and drop files or folders here&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="alignment">
+            <set>Qt::AlignLeft|Qt::AlignVCenter</set>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <spacer name="headerSpacer">
+           <property name="orientation">
+            <enum>Qt::Horizontal</enum>
+           </property>
+           <property name="sizeHint" stdset="0">
+            <size>
+             <width>40</width>
+             <height>20</height>
+            </size>
+           </property>
+          </spacer>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonAddFiles">
+           <property name="text">
+            <string>➕ Add Files...</string>
+           </property>
+           <property name="toolTip">
+            <string>Add files or folders to process (Ctrl+O)</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonClearSelected">
+           <property name="text">
+            <string>❌ Clear Selected</string>
+           </property>
+           <property name="toolTip">
+            <string>Remove selected files from the list</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="buttonClearFiles">
+           <property name="text">
+            <string>🗑️ Clear All</string>
+           </property>
+           <property name="toolTip">
+            <string>Remove all files from the list</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QListWidget" name="listWidgetFiles">
+         <property name="minimumSize">
+          <size>
+           <width>0</width>
+           <height>200</height>
+          </size>
+         </property>
+         <property name="alternatingRowColors">
+          <bool>true</bool>
+         </property>
+         <property name="selectionMode">
+          <enum>QAbstractItemView::ExtendedSelection</enum>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <!-- Algorithm and Options Group -->
+     <widget class="QGroupBox" name="groupBoxAlgorithm">
+      <property name="title">
+       <string>Compression Settings</string>
       </property>
-     </spacer>
+      <layout class="QGridLayout" name="algorithmLayout">
+       <property name="leftMargin">
+        <number>8</number>
+       </property>
+       <property name="topMargin">
+        <number>8</number>
+       </property>
+       <property name="rightMargin">
+        <number>8</number>
+       </property>
+       <property name="bottomMargin">
+        <number>8</number>
+       </property>
+       <property name="horizontalSpacing">
+        <number>12</number>
+       </property>
+       <property name="verticalSpacing">
+        <number>8</number>
+       </property>
+       <item row="0" column="0">
+        <widget class="QLabel" name="labelAlgorithm">
+         <property name="text">
+          <string>Algorithm:</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="1" colspan="2">
+        <widget class="QComboBox" name="comboBoxAlgorithm">
+         <property name="toolTip">
+          <string>Select compression algorithm</string>
+         </property>
+         <item>
+          <property name="text">
+           <string>LZ4 [GPU] - Fast compression</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>Snappy [GPU] - Very fast compression</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>Zstd [GPU/CPU] - Best compression</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>GDeflate [GPU] - GPU-optimized DEFLATE</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>ANS [GPU] - Asymmetric Numeral Systems</string>
+          </property>
+         </item>
+         <item>
+          <property name="text">
+           <string>Bitcomp [GPU] - Lossless numerical</string>
+          </property>
+         </item>
+        </widget>
+       </item>
+       <item row="1" column="0">
+        <widget name="checkBoxVolumes" class="QCheckBox">
+         <property name="text">
+          <string>Split into volumes</string>
+         </property>
+         <property name="toolTip">
+          <string>Split large files into smaller chunks for processing</string>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="1">
+        <widget class="QLabel" name="labelVolumeSize">
+         <property name="text">
+          <string>Volume size (MB):</string>
+         </property>
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="1" column="2">
+        <widget class="QSpinBox" name="spinBoxVolumeSize">
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>10000</number>
+         </property>
+         <property name="value">
+          <number>100</number>
+         </property>
+         <property name="toolTip">
+          <string>Size of each volume in megabytes</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <!-- Output Archive Name -->
+     <layout class="QHBoxLayout" name="outputArchiveLayout">
+      <property name="spacing">
+       <number>8</number>
+      </property>
+      <item>
+       <widget class="QLabel" name="labelOutputArchive">
+        <property name="text">
+         <string>Output Archive Name:</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignRight|Qt::AlignVCenter</set>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLineEdit" name="lineEditOutputArchive">
+        <property name="placeholderText">
+         <string>archive.nvcomp (auto-generated if empty)</string>
+        </property>
+        <property name="toolTip">
+         <string>Name for the output compressed archive. Leave empty for auto-generated name.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="buttonBrowseOutput">
+        <property name="text">
+         <string>Browse...</string>
+        </property>
+        <property name="toolTip">
+         <string>Choose output location and filename</string>
+        </property>
+        <property name="maximumSize">
+         <size>
+          <width>100</width>
+          <height>16777215</height>
+         </size>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <!-- Action Buttons -->
+     <layout class="QHBoxLayout" name="actionButtonsLayout">
+      <property name="spacing">
+       <number>12</number>
+      </property>
+      <item>
+       <widget class="QPushButton" name="buttonCompress">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>40</height>
+         </size>
+        </property>
+        <property name="font">
+         <font>
+          <pointsize>10</pointsize>
+          <weight>75</weight>
+          <bold>true</bold>
+         </font>
+        </property>
+        <property name="text">
+         <string>🗜️ Compress</string>
+        </property>
+        <property name="toolTip">
+         <string>Compress selected files</string>
+        </property>
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="buttonDecompress">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>40</height>
+         </size>
+        </property>
+        <property name="font">
+         <font>
+          <pointsize>10</pointsize>
+          <weight>75</weight>
+          <bold>true</bold>
+         </font>
+        </property>
+        <property name="text">
+         <string>📦 Decompress</string>
+        </property>
+        <property name="toolTip">
+         <string>Decompress selected files</string>
+        </property>
+        <property name="enabled">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <spacer name="actionButtonsSpacer">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>40</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QPushButton" name="buttonSettings">
+        <property name="minimumSize">
+         <size>
+          <width>0</width>
+          <height>40</height>
+         </size>
+        </property>
+        <property name="text">
+         <string>⚙️ Settings</string>
+        </property>
+        <property name="toolTip">
+         <string>Open settings dialog</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </item>
+    <item>
+     <!-- Progress Group -->
+     <widget class="QGroupBox" name="groupBoxProgress">
+      <property name="title">
+       <string>Progress</string>
+      </property>
+      <layout class="QVBoxLayout" name="progressLayout">
+       <property name="spacing">
+        <number>6</number>
+       </property>
+       <item>
+        <widget class="QProgressBar" name="progressBar">
+         <property name="value">
+          <number>0</number>
+         </property>
+         <property name="textVisible">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="labelStatus">
+         <property name="text">
+          <string>Ready</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignCenter</set>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </widget>
     </item>
    </layout>
   </widget>
@@ -49,7 +475,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>800</width>
+     <width>900</width>
      <height>22</height>
     </rect>
    </property>
@@ -57,6 +483,8 @@
     <property name="title">
      <string>&amp;File</string>
     </property>
+    <addaction name="actionAddFiles"/>
+    <addaction name="separator"/>
     <addaction name="actionExit"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
@@ -85,10 +513,50 @@
     <string>F1</string>
    </property>
   </action>
+  <action name="actionAddFiles">
+   <property name="text">
+    <string>Add Files or &amp;Folders...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+O</string>
+   </property>
+  </action>
  </widget>
  <resources>
   <include location="../resources/nvcomp.qrc"/>
  </resources>
- <connections/>
+ <connections>
+  <connection>
+   <sender>checkBoxVolumes</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>labelVolumeSize</receiver>
+   <slot>setEnabled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>100</x>
+     <y>400</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>300</x>
+     <y>400</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>checkBoxVolumes</sender>
+   <signal>toggled(bool)</signal>
+   <receiver>spinBoxVolumeSize</receiver>
+   <slot>setEnabled(bool)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>100</x>
+     <y>400</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>500</x>
+     <y>400</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
 </ui>
-

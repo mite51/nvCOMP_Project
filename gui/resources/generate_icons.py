@@ -79,3 +79,4 @@ if __name__ == '__main__':
     print("Note: These are placeholder icons. For production, replace with")
     print("professionally designed icons featuring the nvCOMP branding.")
 
+

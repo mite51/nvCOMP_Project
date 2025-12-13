@@ -183,6 +183,18 @@ if(BUILD_TESTS)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${NVCOMP_BIN_DIR}/nvcomp_cpu64_5.dll"
             $<TARGET_FILE_DIR:test_mainwindow>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Qt6::Core>
+            $<TARGET_FILE_DIR:test_mainwindow>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Qt6::Widgets>
+            $<TARGET_FILE_DIR:test_mainwindow>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Qt6::Gui>
+            $<TARGET_FILE_DIR:test_mainwindow>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:Qt6::Test>
+            $<TARGET_FILE_DIR:test_mainwindow>
             COMMENT "Copying DLLs to test output directory"
         )
     else()

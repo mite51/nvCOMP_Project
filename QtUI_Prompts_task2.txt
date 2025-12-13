@@ -6,6 +6,7 @@ starting with Task 2.1, please grok that then consider if additional information
 
 @Qt_UI_PLAN.md:185-207 
 
+
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 🎉 Task 2.1: COMPLETE & VERIFIED!
 What We Achieved
@@ -50,7 +51,72 @@ Task 2.2
 We're doing LLM task sprints, small focused changes in a broader plan, so keep changes in scope.
 starting with Task 2.2, please grok that then consider if additional information or clarity is needed. Otherwise, please proceed with the task.
 
-<task description>
-<previous summary>
+@Qt_UI_PLAN.md:211-241
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+🎉 Task 2.2: ENHANCED & IMPROVED!
+
+What We Improved
+✅ Streamlined file selection - No more multi-step dialogs
+✅ Multi-file & folder selection - Select files AND folders simultaneously
+✅ Output archive naming - New field for specifying output archive name
+✅ Enhanced file list management - Clear selected items without clearing all
+✅ Fixed button state issues - "Choose" button stays active for Ctrl+click
+
+Key Improvements Implemented
+
+1. Streamlined File Selection Dialog
+   • Removed the "Select Files or Folder" prompt dialog
+   • Opens directly to file browser with enhanced capabilities
+   • Supports selecting both files AND folders in one operation
+   • Based on Qt Centre community solution for mixed selection
+   • Custom event filter keeps "Choose" button always enabled
+
+2. Advanced Selection Capabilities
+   • Drag selection - Select multiple items by dragging
+   • Ctrl+click - Add/remove individual items from selection
+   • Shift+click - Select ranges of items
+   • Mixed types - Simultaneously select files AND folders
+   • Direct folder expansion - Adds all files from selected folders
+
+3. Output Archive Name Field
+   • New UI element above Compress/Decompress buttons
+   • Text field with placeholder: "archive.nvcomp (auto-generated if empty)"
+   • Browse button to select output location and filename
+   • Auto-generates name if left empty
+   • Shows in compress operation preview
+
+4. Enhanced File List Management
+   • NEW: "Clear Selected" button between Add and Clear All
+   • Remove specific files without clearing entire list
+   • Multi-select support (Ctrl+click, Shift+click)
+   • Maintains internal file list consistency
+   • Smart UI state updates
+
+Technical Implementation
+
+Custom QFileDialog Solution:
+   • Uses DontUseNativeDialog for customization
+   • Finds and modifies QListView and QTreeView selection modes
+   • ButtonEnabledFilter event filter prevents button disable
+   • Direct selection model access for reliable file retrieval
+   • Reference: https://www.qtcentre.org/threads/43841
+
+Files Modified:
+   • gui/ui/mainwindow.ui - Added output archive field and Clear Selected button
+   • gui/src/mainwindow.h - Added new slot declarations
+   • gui/src/mainwindow.cpp - Enhanced file dialog, selection handling
+   • ~75 lines added/modified
+
+Build & Test:
+   cmake --build build_gui --config Release --target nvcomp_gui
+   .\build_gui\gui\Release\nvcomp_gui.exe
+
+User Experience Improvements:
+   ✓ Fewer clicks to add files
+   ✓ More flexible file/folder selection
+   ✓ Better control over output naming
+   ✓ Precise file list management
+   ✓ Consistent button behavior
 
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
