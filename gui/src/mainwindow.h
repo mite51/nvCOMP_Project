@@ -131,10 +131,10 @@ private:
     void updateUiState();
     
     /**
-     * @brief Adds files to the file list
-     * @param files List of file paths to add
+     * @brief Adds files and folders to the list
+     * @param paths List of file or folder paths to add
      */
-    void addFiles(const QStringList &files);
+    void addFiles(const QStringList &paths);
     
 private slots:
     /**

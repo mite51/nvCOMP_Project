@@ -183,43 +183,27 @@ void MainWindow::updateUiState()
     }
 }
 
-void MainWindow::addFiles(const QStringList &files)
+void MainWindow::addFiles(const QStringList &paths)
 {
-    for (const QString &filePath : files) {
-        QFileInfo fileInfo(filePath);
+    for (const QString &path : paths) {
+        QFileInfo fileInfo(path);
         
-        if (fileInfo.isFile()) {
-            // Skip if already in list
-            if (m_fileList.contains(filePath)) {
-                continue;
-            }
-            
-            // Add file to internal list
-            m_fileList.append(filePath);
-            
-            // Add to UI list widget
-            ui->listWidgetFiles->addItem(fileInfo.absoluteFilePath());
+        // Skip if already in list
+        if (m_fileList.contains(path)) {
+            continue;
         }
-        else if (fileInfo.isDir()) {
-            // Handle directory - add all files from it (non-recursive for now)
-            QDir dir(filePath);
-            QFileInfoList fileList = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+        
+        // Add both files and folders directly to the list
+        // The core library will handle recursive folder traversal
+        if (fileInfo.exists()) {
+            m_fileList.append(path);
             
-            for (const QFileInfo &file : fileList) {
-                QString absPath = file.absoluteFilePath();
-                
-                // Skip if already in list
-                if (m_fileList.contains(absPath)) {
-                    continue;
-                }
-                
-                // Add file to internal list
-                m_fileList.append(absPath);
-                
-                // Add to UI list widget with folder context
-                QString displayText = QString("%1/%2").arg(fileInfo.fileName()).arg(file.fileName());
-                ui->listWidgetFiles->addItem(absPath);
+            // Show with appropriate icon/indicator
+            QString displayText = fileInfo.absoluteFilePath();
+            if (fileInfo.isDir()) {
+                displayText += "/";  // Visual indicator for folders
             }
+            ui->listWidgetFiles->addItem(displayText);
         }
     }
     
@@ -239,28 +223,21 @@ void MainWindow::dropEvent(QDropEvent *event)
     const QMimeData *mimeData = event->mimeData();
     
     if (mimeData->hasUrls()) {
-        QStringList filesToAdd;
+        QStringList pathsToAdd;
         
         for (const QUrl &url : mimeData->urls()) {
-            QString filePath = url.toLocalFile();
-            QFileInfo fileInfo(filePath);
+            QString path = url.toLocalFile();
+            QFileInfo fileInfo(path);
             
             if (fileInfo.exists()) {
-                if (fileInfo.isFile()) {
-                    filesToAdd.append(filePath);
-                } else if (fileInfo.isDir()) {
-                    // Add all files from directory (non-recursive for now)
-                    QDir dir(filePath);
-                    QFileInfoList fileList = dir.entryInfoList(QDir::Files);
-                    for (const QFileInfo &file : fileList) {
-                        filesToAdd.append(file.absoluteFilePath());
-                    }
-                }
+                // Add both files and folders directly
+                // The core library will handle recursive folder traversal
+                pathsToAdd.append(path);
             }
         }
         
-        if (!filesToAdd.isEmpty()) {
-            addFiles(filesToAdd);
+        if (!pathsToAdd.isEmpty()) {
+            addFiles(pathsToAdd);
         }
         
         event->acceptProposedAction();

@@ -265,16 +265,10 @@ std::vector<uint8_t> decompressBatchedFormatCPU(AlgoType algo, const std::vector
 // CPU Compression
 // ============================================================================
 
-void compressCPU(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+// Internal function that compresses in-memory archive data
+static void compressCPUFromBuffer(AlgoType algo, const std::vector<uint8_t>& archiveData,
+                                  const std::string& outputFile, uint64_t maxVolumeSize) {
     std::cout << "Using CPU compression (" << algoToString(algo) << ")..." << std::endl;
-    
-    // Create archive (handles both files and directories)
-    std::vector<uint8_t> archiveData;
-    if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
-    } else {
-        archiveData = createArchiveFromFile(inputPath);
-    }
     
     size_t totalSize = archiveData.size();
     std::cout << "Archive size: " << totalSize << " bytes" << std::endl;
@@ -411,21 +405,28 @@ void compressCPU(AlgoType algo, const std::string& inputPath, const std::string&
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
 }
 
-void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
-    std::cout << "Using CPU compression for file list (" << algoToString(algo) << ")..." << std::endl;
+// Public wrapper for single file/folder compression
+void compressCPU(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> archiveData;
+    if (isDirectory(inputPath)) {
+        archiveData = createArchiveFromFolder(inputPath);
+    } else {
+        archiveData = createArchiveFromFile(inputPath);
+    }
     
-    // Create archive from file list
+    // Call internal function with archive data
+    compressCPUFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
+}
+
+void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
+    
+    // Create archive from file list (in memory)
     std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
     
-    // Write to temporary file
-    std::string tempFile = outputFile + ".tmp_archive";
-    writeFile(tempFile, archiveData.data(), archiveData.size());
-    
-    // Compress the temporary archive file using existing function
-    compressCPU(algo, tempFile, outputFile, maxVolumeSize);
-    
-    // Clean up temporary file
-    std::remove(tempFile.c_str());
+    // Compress directly from buffer - no temporary file needed!
+    compressCPUFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
 void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {

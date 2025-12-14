@@ -125,16 +125,10 @@ AlgoType detectAlgorithmFromFile(const std::string& filename) {
 // GPU Batched Compression
 // ============================================================================
 
-void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+// Internal function that compresses in-memory archive data
+static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_t>& archiveData, 
+                                         const std::string& outputFile, uint64_t maxVolumeSize) {
     std::cout << "Using GPU batched compression (" << algoToString(algo) << ")..." << std::endl;
-    
-    // Create archive (handles both files and directories)
-    std::vector<uint8_t> archiveData;
-    if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
-    } else {
-        archiveData = createArchiveFromFile(inputPath);
-    }
     
     size_t totalSize = archiveData.size();
     std::cout << "Archive size: " << totalSize << " bytes" << std::endl;
@@ -546,21 +540,28 @@ void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
 }
 
-void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
-    std::cout << "Using GPU batched compression for file list (" << algoToString(algo) << ")..." << std::endl;
+// Public wrapper for single file/folder compression
+void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> archiveData;
+    if (isDirectory(inputPath)) {
+        archiveData = createArchiveFromFolder(inputPath);
+    } else {
+        archiveData = createArchiveFromFile(inputPath);
+    }
     
-    // Create archive from file list
+    // Call internal function with archive data
+    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
+}
+
+void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
+    
+    // Create archive from file list (in memory)
     std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
     
-    // Write to temporary file
-    std::string tempFile = outputFile + ".tmp_archive";
-    writeFile(tempFile, archiveData.data(), archiveData.size());
-    
-    // Compress the temporary archive file using existing function
-    compressGPUBatched(algo, tempFile, outputFile, maxVolumeSize);
-    
-    // Clean up temporary file
-    std::remove(tempFile.c_str());
+    // Compress directly from buffer - no temporary file needed!
+    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
 // ============================================================================
@@ -708,16 +709,10 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
 // GPU Manager API Compression
 // ============================================================================
 
-void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+// Internal function that compresses in-memory archive data
+static void compressGPUManagerFromBuffer(AlgoType algo, const std::vector<uint8_t>& archiveData,
+                                         const std::string& outputFile, uint64_t maxVolumeSize) {
     std::cout << "Using GPU manager compression (" << algoToString(algo) << ")..." << std::endl;
-    
-    // Create archive (handles both files and directories)
-    std::vector<uint8_t> archiveData;
-    if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
-    } else {
-        archiveData = createArchiveFromFile(inputPath);
-    }
     
     size_t totalSize = archiveData.size();
     std::cout << "Archive size: " << totalSize << " bytes" << std::endl;
@@ -904,21 +899,28 @@ void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
 }
 
-void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
-    std::cout << "Using GPU manager compression for file list (" << algoToString(algo) << ")..." << std::endl;
+// Public wrapper for single file/folder compression
+void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+    // Create archive (handles both files and directories)
+    std::vector<uint8_t> archiveData;
+    if (isDirectory(inputPath)) {
+        archiveData = createArchiveFromFolder(inputPath);
+    } else {
+        archiveData = createArchiveFromFile(inputPath);
+    }
     
-    // Create archive from file list
+    // Call internal function with archive data
+    compressGPUManagerFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
+}
+
+void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
+    
+    // Create archive from file list (in memory)
     std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
     
-    // Write to temporary file
-    std::string tempFile = outputFile + ".tmp_archive";
-    writeFile(tempFile, archiveData.data(), archiveData.size());
-    
-    // Compress the temporary archive file using existing function
-    compressGPUManager(algo, tempFile, outputFile, maxVolumeSize);
-    
-    // Clean up temporary file
-    std::remove(tempFile.c_str());
+    // Compress directly from buffer - no temporary file needed!
+    compressGPUManagerFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
 // ============================================================================

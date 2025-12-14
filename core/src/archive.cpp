@@ -201,34 +201,65 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         throw std::runtime_error("No files to archive");
     }
     
-    std::cout << "Creating archive from " << filePaths.size() << " file(s)" << std::endl;
+    std::cout << "Creating archive from " << filePaths.size() << " item(s)" << std::endl;
+    
+    // Collect all files, expanding directories recursively
+    struct FileWithBase {
+        fs::path filePath;
+        fs::path basePath;  // For calculating relative paths
+    };
+    
+    std::vector<FileWithBase> allFiles;
+    
+    for (const auto& itemPath : filePaths) {
+        fs::path p(itemPath);
+        
+        if (!fs::exists(p)) {
+            std::cerr << "Warning: Skipping non-existent path: " << itemPath << std::endl;
+            continue;
+        }
+        
+        if (fs::is_regular_file(p)) {
+            // Single file - use parent directory as base
+            allFiles.push_back({p, p.parent_path()});
+        } else if (fs::is_directory(p)) {
+            // Directory - collect all files recursively
+            auto dirFiles = collectFiles(p);
+            for (const auto& file : dirFiles) {
+                allFiles.push_back({file, p});  // Use the directory itself as base
+            }
+        }
+    }
+    
+    if (allFiles.empty()) {
+        throw std::runtime_error("No files found to archive");
+    }
+    
+    std::cout << "Total files to archive: " << allFiles.size() << std::endl;
     
     // Write header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
     header.version = ARCHIVE_VERSION;
-    header.fileCount = static_cast<uint32_t>(filePaths.size());
+    header.fileCount = static_cast<uint32_t>(allFiles.size());
     header.reserved = 0;
     
     const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
     archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
     
     // Write each file
-    for (const auto& filePath : filePaths) {
-        fs::path p(filePath);
-        
-        if (!fs::exists(p) || !fs::is_regular_file(p)) {
-            std::cerr << "Warning: Skipping non-existent or non-regular file: " << filePath << std::endl;
-            continue;
+    for (const auto& fileWithBase : allFiles) {
+        std::string relativePath = getRelativePath(fileWithBase.filePath.string(), fileWithBase.basePath.string());
+        if (relativePath.empty() || relativePath == ".") {
+            relativePath = fileWithBase.filePath.filename().string();
         }
         
-        std::string filename = p.filename().string();
-        std::cout << "  Adding: " << filename << std::flush;
+        std::cout << "  Adding: " << relativePath << std::flush;
         
-        auto fileData = readFile(filePath);
+        auto fileData = readFile(fileWithBase.filePath.string());
         
         FileEntry entry;
-        entry.pathLength = static_cast<uint32_t>(filename.length());
+        entry.pathLength = static_cast<uint32_t>(relativePath.length());
         entry.fileSize = fileData.size();
         
         // Write entry header
@@ -236,7 +267,7 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
         
         // Write path
-        archiveData.insert(archiveData.end(), filename.begin(), filename.end());
+        archiveData.insert(archiveData.end(), relativePath.begin(), relativePath.end());
         
         // Write file data
         archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
