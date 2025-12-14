@@ -30,10 +30,12 @@ message(STATUS "  Qt6 version: ${Qt6_VERSION}")
 set(GUI_SOURCES
     src/main.cpp
     src/mainwindow.cpp
+    src/compression_worker.cpp
 )
 
 set(GUI_HEADERS
     src/mainwindow.h
+    src/compression_worker.h
 )
 
 set(GUI_UI_FILES
@@ -155,6 +157,7 @@ if(BUILD_TESTS)
     add_executable(test_mainwindow
         tests/test_mainwindow.cpp
         src/mainwindow.cpp  # Include source to test
+        src/compression_worker.cpp  # Include worker source
     )
     
     target_include_directories(test_mainwindow PRIVATE

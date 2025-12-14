@@ -194,6 +194,59 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath) {
     return archiveData;
 }
 
+std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths) {
+    std::vector<uint8_t> archiveData;
+    
+    if (filePaths.empty()) {
+        throw std::runtime_error("No files to archive");
+    }
+    
+    std::cout << "Creating archive from " << filePaths.size() << " file(s)" << std::endl;
+    
+    // Write header
+    ArchiveHeader header;
+    header.magic = ARCHIVE_MAGIC;
+    header.version = ARCHIVE_VERSION;
+    header.fileCount = static_cast<uint32_t>(filePaths.size());
+    header.reserved = 0;
+    
+    const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
+    archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
+    
+    // Write each file
+    for (const auto& filePath : filePaths) {
+        fs::path p(filePath);
+        
+        if (!fs::exists(p) || !fs::is_regular_file(p)) {
+            std::cerr << "Warning: Skipping non-existent or non-regular file: " << filePath << std::endl;
+            continue;
+        }
+        
+        std::string filename = p.filename().string();
+        std::cout << "  Adding: " << filename << std::flush;
+        
+        auto fileData = readFile(filePath);
+        
+        FileEntry entry;
+        entry.pathLength = static_cast<uint32_t>(filename.length());
+        entry.fileSize = fileData.size();
+        
+        // Write entry header
+        const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
+        archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
+        
+        // Write path
+        archiveData.insert(archiveData.end(), filename.begin(), filename.end());
+        
+        // Write file data
+        archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
+        
+        std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+    }
+    
+    return archiveData;
+}
+
 // ============================================================================
 // Archive Extraction
 // ============================================================================

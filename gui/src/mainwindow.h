@@ -16,6 +16,8 @@ QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
+class CompressionWorker;
+
 /**
  * @class MainWindow
  * @brief Main application window
@@ -105,6 +107,7 @@ private:
     bool m_initialized;  ///< Initialization state flag
     QStringList m_fileList;  ///< List of files to process
     bool m_gpuAvailable;  ///< GPU availability status
+    CompressionWorker *m_worker;  ///< Background compression worker thread
     
     /**
      * @brief Initializes UI components and connections
@@ -203,6 +206,47 @@ private slots:
      * Opens file dialog to select output location and filename
      */
     void onBrowseOutputClicked();
+    
+    /**
+     * @brief Handles worker progress updates
+     * @param percentage Progress percentage (0-100)
+     * @param currentFile Currently processing file
+     */
+    void onWorkerProgress(int percentage, const QString &currentFile);
+    
+    /**
+     * @brief Handles worker detailed progress updates
+     * @param current Current bytes processed
+     * @param total Total bytes to process
+     * @param speedMBps Processing speed in MB/s
+     * @param etaSeconds Estimated time remaining in seconds
+     */
+    void onWorkerProgressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds);
+    
+    /**
+     * @brief Handles worker completion
+     * @param outputPath Path to the output file or directory
+     * @param compressionRatio Compression ratio (compressed/uncompressed)
+     * @param durationMs Operation duration in milliseconds
+     */
+    void onWorkerFinished(const QString &outputPath, double compressionRatio, qint64 durationMs);
+    
+    /**
+     * @brief Handles worker errors
+     * @param errorMessage Error description
+     */
+    void onWorkerError(const QString &errorMessage);
+    
+    /**
+     * @brief Handles worker cancellation
+     */
+    void onWorkerCanceled();
+    
+    /**
+     * @brief Handles worker status messages
+     * @param message Status message for display
+     */
+    void onWorkerStatusMessage(const QString &message);
 };
 
 #endif // MAINWINDOW_H

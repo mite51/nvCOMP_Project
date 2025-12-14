@@ -119,6 +119,7 @@ NVCOMP_CORE_API bool checkGPUMemoryForVolume(uint64_t volumeSize);
 
 NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath);
 NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFile(const std::string& filePath);
+NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths);
 NVCOMP_CORE_API void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& outputPath);
 NVCOMP_CORE_API void listArchive(const std::vector<uint8_t>& archiveData);
 NVCOMP_CORE_API void listCompressedArchive(AlgoType algo, const std::string& inputFile, bool useCPU, bool cudaAvailable);
@@ -129,6 +130,8 @@ NVCOMP_CORE_API void listCompressedArchive(AlgoType algo, const std::string& inp
 
 NVCOMP_CORE_API void compressGPUBatched(AlgoType algo, const std::string& inputPath, 
                                          const std::string& outputFile, uint64_t maxVolumeSize);
+NVCOMP_CORE_API void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
+                                         const std::string& outputFile, uint64_t maxVolumeSize);
 NVCOMP_CORE_API void decompressGPUBatched(AlgoType algo, const std::string& inputFile, 
                                            const std::string& outputPath);
 
@@ -138,6 +141,8 @@ NVCOMP_CORE_API void decompressGPUBatched(AlgoType algo, const std::string& inpu
 
 NVCOMP_CORE_API void compressGPUManager(AlgoType algo, const std::string& inputPath, 
                                          const std::string& outputFile, uint64_t maxVolumeSize);
+NVCOMP_CORE_API void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
+                                         const std::string& outputFile, uint64_t maxVolumeSize);
 NVCOMP_CORE_API void decompressGPUManager(const std::string& inputFile, const std::string& outputPath);
 
 // ============================================================================
@@ -145,6 +150,8 @@ NVCOMP_CORE_API void decompressGPUManager(const std::string& inputFile, const st
 // ============================================================================
 
 NVCOMP_CORE_API void compressCPU(AlgoType algo, const std::string& inputPath, 
+                                  const std::string& outputFile, uint64_t maxVolumeSize);
+NVCOMP_CORE_API void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
                                   const std::string& outputFile, uint64_t maxVolumeSize);
 NVCOMP_CORE_API void decompressCPU(AlgoType algo, const std::string& inputFile, 
                                     const std::string& outputPath);

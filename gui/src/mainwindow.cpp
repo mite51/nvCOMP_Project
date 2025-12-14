@@ -5,6 +5,7 @@
 
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "compression_worker.h"
 #include <QMessageBox>
 #include <QApplication>
 #include <QFileDialog>
@@ -47,6 +48,7 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
     , m_initialized(false)
     , m_gpuAvailable(false)
+    , m_worker(nullptr)
 {
     ui->setupUi(this);
     setupUi();
@@ -58,6 +60,20 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    // Clean up worker if it exists
+    if (m_worker) {
+        if (m_worker->isRunning()) {
+            m_worker->cancel();
+            // Wait up to 5 seconds for thread to finish
+            if (!m_worker->wait(5000)) {
+                m_worker->terminate();
+                m_worker->wait();  // Wait for termination to complete
+            }
+        }
+        delete m_worker;
+        m_worker = nullptr;
+    }
+    
     delete ui;
 }
 
@@ -106,8 +122,9 @@ void MainWindow::setupConnections()
     // Connect action buttons
     connect(ui->buttonCompress, &QPushButton::clicked,
             this, &MainWindow::onCompressClicked);
-    connect(ui->buttonDecompress, &QPushButton::clicked,
-            this, &MainWindow::onDecompressClicked);
+    // buttonDecompress is hidden - this is an archive creation window
+    // connect(ui->buttonDecompress, &QPushButton::clicked,
+    //         this, &MainWindow::onDecompressClicked);
     connect(ui->buttonSettings, &QPushButton::clicked,
             this, &MainWindow::onSettingsClicked);
     connect(ui->buttonBrowseOutput, &QPushButton::clicked,
@@ -124,9 +141,8 @@ void MainWindow::setupConnections()
 
 void MainWindow::checkGpuAvailability()
 {
-    // For now, simulate GPU check
-    // In future tasks, this will use actual nvCOMP GPU detection
-    m_gpuAvailable = false;  // Assume no GPU for now
+    // Check for CUDA GPU availability using nvCOMP API
+    m_gpuAvailable = nvcomp_is_cuda_available();
     
     if (m_gpuAvailable) {
         ui->labelGpuStatus->setText("GPU Status: ✅ GPU Available");
@@ -142,10 +158,11 @@ void MainWindow::checkGpuAvailability()
 
 void MainWindow::updateUiState()
 {
-    // Enable/disable compress and decompress buttons based on file list
+    // Enable/disable compress button based on file list
     bool hasFiles = !m_fileList.isEmpty();
     ui->buttonCompress->setEnabled(hasFiles);
-    ui->buttonDecompress->setEnabled(hasFiles);
+    // buttonDecompress is hidden - this is an archive creation window
+    // ui->buttonDecompress->setEnabled(hasFiles);
     
     // Update status label
     if (hasFiles) {
@@ -256,7 +273,23 @@ QStringList MainWindow::getFileList() const
 
 QString MainWindow::getSelectedAlgorithm() const
 {
-    return ui->comboBoxAlgorithm->currentText();
+    // Get the user data which contains the actual algorithm name
+    QString algoData = ui->comboBoxAlgorithm->currentData().toString();
+    if (!algoData.isEmpty()) {
+        return algoData;
+    }
+    
+    // Fallback: parse algorithm name from display text
+    // Display format: "AlgoName [GPU/CPU] - Description"
+    QString displayText = ui->comboBoxAlgorithm->currentText();
+    
+    // Extract just the algorithm name (first word)
+    int spaceIdx = displayText.indexOf(' ');
+    if (spaceIdx > 0) {
+        return displayText.left(spaceIdx);
+    }
+    
+    return displayText;
 }
 
 bool MainWindow::isCpuModeEnabled() const
@@ -421,39 +454,141 @@ void MainWindow::onClearFilesClicked()
 
 void MainWindow::onCompressClicked()
 {
-    // Stub for now - will be implemented in future tasks
-    QString outputName = getOutputArchiveName();
-    if (outputName.isEmpty()) {
-        outputName = "(auto-generated)";
+    // Check if this is a cancel request
+    if (m_worker && m_worker->isRunning()) {
+        // User clicked Cancel - stop the operation
+        m_worker->cancel();
+        
+        // Disable button while waiting for worker to stop
+        ui->buttonCompress->setEnabled(false);
+        ui->buttonCompress->setText("⏳ Stopping...");
+        ui->buttonCompress->setToolTip("Waiting for operation to stop");
+        statusBar()->showMessage("Cancelling operation...");
+        
+        // Wait for worker to actually stop (up to 3 seconds)
+        if (!m_worker->wait(3000)) {
+            m_worker->terminate();
+            m_worker->wait();
+        }
+        
+        // Restore button
+        ui->buttonCompress->setText("🗜️ Compress");
+        ui->buttonCompress->setToolTip("Compress selected files");
+        ui->buttonCompress->setEnabled(true);
+        statusBar()->showMessage("Operation cancelled", 3000);
+        ui->progressBar->setValue(0);
+        
+        return;
     }
     
-    QMessageBox::information(this,
-        tr("Compress"),
-        tr("Compression will be implemented in Task 2.3: Compression Backend Integration\n\n"
-           "Current settings:\n"
-           "Algorithm: %1\n"
-           "Files: %2\n"
-           "Output: %3\n"
-           "CPU Mode: %4")
-           .arg(getSelectedAlgorithm())
-           .arg(m_fileList.count())
-           .arg(outputName)
-           .arg(isCpuModeEnabled() ? "Yes" : "No")
-    );
+    if (m_fileList.isEmpty()) {
+        QMessageBox::warning(this, tr("No Files"), tr("Please add files to compress first."));
+        return;
+    }
+    
+    // Get settings
+    QString algorithm = getSelectedAlgorithm();
+    QString outputPath = getOutputArchiveName();
+    bool useCpuMode = isCpuModeEnabled();
+    uint64_t volumeSize = 0;
+    
+    if (isVolumesEnabled()) {
+        volumeSize = static_cast<uint64_t>(getVolumeSize()) * 1024 * 1024;  // Convert MB to bytes
+    }
+    
+    // Create worker if it doesn't exist
+    if (!m_worker) {
+        m_worker = new CompressionWorker(this);
+        
+        // Connect signals
+        connect(m_worker, &CompressionWorker::progressChanged,
+                this, &MainWindow::onWorkerProgress);
+        connect(m_worker, &CompressionWorker::progressDetails,
+                this, &MainWindow::onWorkerProgressDetails);
+        connect(m_worker, &CompressionWorker::finished,
+                this, &MainWindow::onWorkerFinished);
+        connect(m_worker, &CompressionWorker::error,
+                this, &MainWindow::onWorkerError);
+        connect(m_worker, &CompressionWorker::canceled,
+                this, &MainWindow::onWorkerCanceled);
+        connect(m_worker, &CompressionWorker::statusMessage,
+                this, &MainWindow::onWorkerStatusMessage);
+    }
+    
+    // Setup and start compression
+    m_worker->setupCompress(m_fileList, outputPath, algorithm, useCpuMode, volumeSize);
+    m_worker->start();
+    
+    // Update UI state - Change Compress button to Cancel
+    ui->buttonCompress->setText("❌ Cancel");
+    ui->buttonCompress->setToolTip("Cancel compression operation");
+    ui->buttonCompress->setEnabled(true);  // Keep enabled so user can cancel
+    // ui->buttonDecompress->setEnabled(false);  // Hidden - archive creation window
+    ui->buttonClearFiles->setEnabled(false);
+    ui->buttonClearSelected->setEnabled(false);
+    ui->progressBar->setValue(0);
+    statusBar()->showMessage("Compression started...");
 }
 
 void MainWindow::onDecompressClicked()
 {
-    // Stub for now - will be implemented in future tasks
-    QMessageBox::information(this,
-        tr("Decompress"),
-        tr("Decompression will be implemented in Task 2.3: Compression Backend Integration\n\n"
-           "Current settings:\n"
-           "Files: %1\n"
-           "CPU Mode: %2")
-           .arg(m_fileList.count())
-           .arg(isCpuModeEnabled() ? "Yes" : "No")
+    if (m_fileList.isEmpty()) {
+        QMessageBox::warning(this, tr("No Files"), tr("Please add files to decompress first."));
+        return;
+    }
+    
+    // Check if worker is already running
+    if (m_worker && m_worker->isRunning()) {
+        QMessageBox::warning(this, tr("Operation in Progress"), 
+                           tr("An operation is already in progress. Please wait or cancel it."));
+        return;
+    }
+    
+    // Get output directory
+    QString outputPath = QFileDialog::getExistingDirectory(
+        this,
+        tr("Select Output Directory"),
+        QString(),
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
     );
+    
+    if (outputPath.isEmpty()) {
+        return;  // User canceled
+    }
+    
+    // Get settings
+    bool useCpuMode = isCpuModeEnabled();
+    
+    // Create worker if it doesn't exist
+    if (!m_worker) {
+        m_worker = new CompressionWorker(this);
+        
+        // Connect signals
+        connect(m_worker, &CompressionWorker::progressChanged,
+                this, &MainWindow::onWorkerProgress);
+        connect(m_worker, &CompressionWorker::progressDetails,
+                this, &MainWindow::onWorkerProgressDetails);
+        connect(m_worker, &CompressionWorker::finished,
+                this, &MainWindow::onWorkerFinished);
+        connect(m_worker, &CompressionWorker::error,
+                this, &MainWindow::onWorkerError);
+        connect(m_worker, &CompressionWorker::canceled,
+                this, &MainWindow::onWorkerCanceled);
+        connect(m_worker, &CompressionWorker::statusMessage,
+                this, &MainWindow::onWorkerStatusMessage);
+    }
+    
+    // Setup and start decompression
+    m_worker->setupDecompress(m_fileList, outputPath, QString(), useCpuMode);
+    m_worker->start();
+    
+    // Update UI state
+    ui->buttonCompress->setEnabled(false);
+    // ui->buttonDecompress->setEnabled(false);  // Hidden - archive creation window
+    ui->buttonClearFiles->setEnabled(false);
+    ui->buttonClearSelected->setEnabled(false);
+    ui->progressBar->setValue(0);
+    statusBar()->showMessage("Decompression started...");
 }
 
 void MainWindow::onSettingsClicked()
@@ -495,6 +630,132 @@ void MainWindow::onBrowseOutputClicked()
     if (!fileName.isEmpty()) {
         ui->lineEditOutputArchive->setText(fileName);
     }
+}
+
+void MainWindow::onWorkerProgress(int percentage, const QString &currentFile)
+{
+    ui->progressBar->setValue(percentage);
+    
+    if (!currentFile.isEmpty()) {
+        statusBar()->showMessage(QString("Processing: %1 (%2%)").arg(currentFile).arg(percentage));
+    } else {
+        statusBar()->showMessage(QString("Progress: %1%").arg(percentage));
+    }
+}
+
+void MainWindow::onWorkerProgressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds)
+{
+    // Format size in human-readable form
+    auto formatSize = [](uint64_t bytes) -> QString {
+        if (bytes < 1024) return QString("%1 B").arg(bytes);
+        if (bytes < 1024 * 1024) return QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 2);
+        if (bytes < 1024 * 1024 * 1024) return QString("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
+        return QString("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+    };
+    
+    // Format ETA
+    auto formatTime = [](int seconds) -> QString {
+        if (seconds < 60) return QString("%1s").arg(seconds);
+        if (seconds < 3600) return QString("%1m %2s").arg(seconds / 60).arg(seconds % 60);
+        return QString("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
+    };
+    
+    QString detailsText = QString("%1 / %2 @ %3 MB/s (ETA: %4)")
+                             .arg(formatSize(current))
+                             .arg(formatSize(total))
+                             .arg(speedMBps, 0, 'f', 2)
+                             .arg(formatTime(etaSeconds));
+    
+    ui->labelStatus->setText(detailsText);
+}
+
+void MainWindow::onWorkerFinished(const QString &outputPath, double compressionRatio, qint64 durationMs)
+{
+    // Re-enable buttons and restore Compress button text
+    ui->buttonCompress->setText("🗜️ Compress");
+    ui->buttonCompress->setToolTip("Compress selected files");
+    ui->buttonCompress->setEnabled(true);
+    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
+    ui->buttonClearFiles->setEnabled(true);
+    ui->buttonClearSelected->setEnabled(true);
+    
+    // Update progress bar to 100%
+    ui->progressBar->setValue(100);
+    
+    // Format duration
+    double durationSec = durationMs / 1000.0;
+    QString durationText;
+    if (durationSec < 60) {
+        durationText = QString("%1s").arg(durationSec, 0, 'f', 2);
+    } else {
+        int minutes = static_cast<int>(durationSec / 60);
+        double seconds = durationSec - (minutes * 60);
+        durationText = QString("%1m %2s").arg(minutes).arg(seconds, 0, 'f', 1);
+    }
+    
+    // Show completion message
+    QString message;
+    if (compressionRatio > 0.0) {
+        // Compression operation
+        double compressionPercent = compressionRatio * 100.0;
+        message = tr("Compression completed successfully!\n\n"
+                    "Output: %1\n"
+                    "Compression ratio: %2% (smaller is better)\n"
+                    "Time taken: %3")
+                    .arg(outputPath)
+                    .arg(compressionPercent, 0, 'f', 2)
+                    .arg(durationText);
+    } else {
+        // Decompression operation
+        message = tr("Decompression completed successfully!\n\n"
+                    "Output: %1\n"
+                    "Time taken: %2")
+                    .arg(outputPath)
+                    .arg(durationText);
+    }
+    
+    QMessageBox::information(this, tr("Success"), message);
+    
+    statusBar()->showMessage(tr("Operation completed in %1").arg(durationText), 5000);
+}
+
+void MainWindow::onWorkerError(const QString &errorMessage)
+{
+    // Re-enable buttons and restore Compress button text
+    ui->buttonCompress->setText("🗜️ Compress");
+    ui->buttonCompress->setToolTip("Compress selected files");
+    ui->buttonCompress->setEnabled(true);
+    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
+    ui->buttonClearFiles->setEnabled(true);
+    ui->buttonClearSelected->setEnabled(true);
+    
+    // Show error message
+    QMessageBox::critical(this, tr("Error"), 
+                         tr("Operation failed:\n\n%1").arg(errorMessage));
+    
+    statusBar()->showMessage(tr("Operation failed"), 5000);
+    ui->progressBar->setValue(0);
+}
+
+void MainWindow::onWorkerCanceled()
+{
+    // Re-enable buttons and restore Compress button text
+    ui->buttonCompress->setText("🗜️ Compress");
+    ui->buttonCompress->setToolTip("Compress selected files");
+    ui->buttonCompress->setEnabled(true);
+    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
+    ui->buttonClearFiles->setEnabled(true);
+    ui->buttonClearSelected->setEnabled(true);
+    
+    QMessageBox::information(this, tr("Canceled"), tr("Operation was canceled."));
+    
+    statusBar()->showMessage(tr("Operation canceled"), 3000);
+    ui->progressBar->setValue(0);
+}
+
+void MainWindow::onWorkerStatusMessage(const QString &message)
+{
+    statusBar()->showMessage(message, 3000);
 }
 
 

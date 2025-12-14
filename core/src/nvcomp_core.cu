@@ -57,8 +57,8 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
 ) {
     std::vector<std::vector<uint8_t>> volumes;
     
-    // If archive fits in single volume, return as-is
-    if (archiveData.size() <= maxVolumeSize) {
+    // If maxVolumeSize is 0 (disabled) or archive fits in single volume, return as-is
+    if (maxVolumeSize == 0 || archiveData.size() <= maxVolumeSize) {
         volumes.push_back(archiveData);
         return volumes;
     }
@@ -546,6 +546,23 @@ void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
 }
 
+void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Using GPU batched compression for file list (" << algoToString(algo) << ")..." << std::endl;
+    
+    // Create archive from file list
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    
+    // Write to temporary file
+    std::string tempFile = outputFile + ".tmp_archive";
+    writeFile(tempFile, archiveData.data(), archiveData.size());
+    
+    // Compress the temporary archive file using existing function
+    compressGPUBatched(algo, tempFile, outputFile, maxVolumeSize);
+    
+    // Clean up temporary file
+    std::remove(tempFile.c_str());
+}
+
 // ============================================================================
 // GPU Batched Decompression
 // ============================================================================
@@ -885,6 +902,23 @@ void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::
               << (double)totalSize / totalCompressedSize << "x" << std::endl;
     std::cout << "Total time: " << totalDuration << "s (" 
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
+}
+
+void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Using GPU manager compression for file list (" << algoToString(algo) << ")..." << std::endl;
+    
+    // Create archive from file list
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    
+    // Write to temporary file
+    std::string tempFile = outputFile + ".tmp_archive";
+    writeFile(tempFile, archiveData.data(), archiveData.size());
+    
+    // Compress the temporary archive file using existing function
+    compressGPUManager(algo, tempFile, outputFile, maxVolumeSize);
+    
+    // Clean up temporary file
+    std::remove(tempFile.c_str());
 }
 
 // ============================================================================

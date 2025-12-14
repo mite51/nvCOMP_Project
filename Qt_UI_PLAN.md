@@ -409,6 +409,103 @@ Unit tests can be found in /unit_tests, there are a number of .bat/.sh files to 
 
 ---
 
+### Task 3.5: Advanced Progress Tracking and Block Visualization
+**Duration:** 1-2 sessions  
+**Complexity:** Medium-High  
+**Dependencies:** Task 2.4
+
+**Objective:** Implement granular, block-level progress feedback from core library with visual block completion display in GUI.
+
+**Deliverables:**
+
+**Core Library Enhancements:**
+- Modify `nvcomp_core.cu` to report block-level progress
+- Add block progress callback to C++ API
+- Track individual block states (pending, compressing, complete)
+- Report block index, total blocks, and per-block compression ratio
+- Add progress callback to C API with block information
+
+**C API Progress Callback:**
+```c
+typedef struct {
+    int totalBlocks;          // Total number of blocks/chunks
+    int completedBlocks;      // Blocks completed so far
+    int currentBlock;         // Currently processing block index
+    size_t currentBlockSize;  // Size of current block
+    float overallProgress;    // 0.0 to 1.0
+    float currentBlockProgress; // 0.0 to 1.0 for current block
+    double throughputMBps;    // Current throughput
+    const char* stage;        // "preparing", "compressing", "writing"
+} nvcomp_progress_info_t;
+
+typedef void (*nvcomp_progress_callback_t)(
+    nvcomp_operation_handle handle,
+    const nvcomp_progress_info_t* info,
+    void* user_data
+);
+```
+
+**GUI Enhancements:**
+- `gui/src/progress_widget.cpp/h` - Custom widget for block visualization
+- Grid or bar display showing block states
+- Color-coded blocks: Gray (pending), Yellow (processing), Green (complete)
+- Per-block compression ratio overlay
+- Real-time throughput graph
+- ETA calculation based on actual progress
+- Responsive updates (throttled to 30-60 FPS)
+
+**Visual Design:**
+```
+┌─────────────────────────────────────────────────┐
+│ Compressing: file.dat (1.2 GB)                  │
+├─────────────────────────────────────────────────┤
+│ Overall Progress: 65% (780 MB / 1.2 GB)         │
+│ Speed: 450 MB/s  |  ETA: 00:02:15               │
+├─────────────────────────────────────────────────┤
+│ Block Progress (128 MB chunks):                 │
+│ [█][█][█][█][█][█][▓][░][░][░]  (6/10 complete) │
+│                                                  │
+│ Current Block: #7 (45% complete)                │
+│ Block Compression Ratio: 0.42 (58% reduction)   │
+└─────────────────────────────────────────────────┘
+```
+
+**Integration:**
+- Update `CompressionWorker` to receive block-level callbacks
+- Emit new signals: `blockProgressChanged(int block, float progress)`
+- Emit new signals: `blockCompleted(int block, float ratio)`
+- Connect to `ProgressWidget` for visualization
+- Add toggle in settings: "Show detailed progress" (on/off)
+- Option to show simple progress bar or advanced block view
+
+**Performance Considerations:**
+- Throttle GUI updates (max 30-60 Hz)
+- Use QTimer for batch updates
+- Don't block on every callback
+- Minimal overhead in core library (<1%)
+- Efficient block state storage
+
+**Algorithm-Specific Handling:**
+- GPU Batched: Report per-batch progress
+- GPU Manager: Report per-chunk progress
+- CPU Mode: Report per-thread progress
+- Multi-volume: Show volume + block progress
+
+**Success Criteria:**
+- Core library reports accurate block progress
+- GUI displays real-time block visualization
+- Progress updates are smooth and non-blocking
+- Performance overhead <1% compared to no progress
+- Works with all compression algorithms
+- Block display scales to different file sizes (auto-adjust block count display)
+- Can toggle between simple and advanced progress views
+- ✅ All existing tests pass
+- ✅ Tests added: `test_progress_callbacks.cpp` for callback accuracy
+- ✅ Tests verify throttling and performance overhead
+- ✅ GUI tests verify block visualization updates
+
+---
+
 ## Phase 4: Windows Integration (Week 7)
 
 ### Task 4.1: Windows Context Menu Integration
@@ -1340,6 +1437,232 @@ Requirements:
 Files attached: @gui/src/mainwindow.h @gui/src/compression_worker.h
 
 Provide complete batch processing implementation.
+```
+
+---
+
+### **Prompt for Task 3.5: Advanced Progress Tracking and Block Visualization**
+
+```
+I need to implement granular, block-level progress feedback from the core compression library and create a visual block completion display in the Qt GUI.
+
+Current state:
+- Basic progress bar exists (0-100%)
+- Progress is simulated at milestones (10%, 25%, 90%, 100%)
+- No visibility into which blocks/chunks are being compressed
+- No real-time throughput or ETA calculation
+
+Objective:
+Create a professional, real-time progress visualization that shows:
+1. Individual block/chunk compression status
+2. Per-block compression ratios
+3. Accurate overall progress based on actual work done
+4. Real-time throughput and ETA
+
+Please help me:
+
+**Part 1: Core Library Progress Callbacks**
+
+1. **Modify nvcomp_core.cu/cpp:**
+   - Add block-level progress tracking to compression functions
+   - Identify natural progress points (per-batch in GPU batched mode, per-chunk in manager mode)
+   - Create progress info structure with:
+     - Total blocks
+     - Current block index
+     - Block size
+     - Overall progress (0.0 to 1.0)
+     - Current block progress (0.0 to 1.0)
+     - Current throughput (MB/s)
+     - Current stage ("preparing", "compressing", "writing")
+
+2. **Update C++ API (nvcomp_core.hpp):**
+   ```cpp
+   struct BlockProgressInfo {
+       int totalBlocks;
+       int completedBlocks;
+       int currentBlock;
+       size_t currentBlockSize;
+       float overallProgress;
+       float currentBlockProgress;
+       double throughputMBps;
+       std::string stage;
+   };
+   
+   using ProgressCallback = std::function<void(const BlockProgressInfo&)>;
+   
+   // Add callback parameter to compression functions
+   void compressGPUBatched(..., ProgressCallback callback = nullptr);
+   ```
+
+3. **Update C API (nvcomp_c_api.h):**
+   ```c
+   typedef struct {
+       int totalBlocks;
+       int completedBlocks;
+       int currentBlock;
+       size_t currentBlockSize;
+       float overallProgress;
+       float currentBlockProgress;
+       double throughputMBps;
+       const char* stage;
+   } nvcomp_progress_info_t;
+   
+   typedef void (*nvcomp_progress_callback_t)(
+       nvcomp_operation_handle handle,
+       const nvcomp_progress_info_t* info,
+       void* user_data
+   );
+   ```
+
+**Part 2: GUI Progress Widget**
+
+4. **Create ProgressWidget class:**
+   - Header: `gui/src/progress_widget.h`
+   - Implementation: `gui/src/progress_widget.cpp`
+   - UI: `gui/ui/progress_widget.ui` (optional, can be code-only)
+
+5. **Visual Design:**
+   - Grid or horizontal bar showing individual blocks
+   - Color scheme:
+     - Gray/Light: Pending blocks
+     - Yellow/Orange: Currently compressing
+     - Green: Completed blocks
+     - Red: Failed blocks (if applicable)
+   - Hover tooltip on each block: size, ratio, time
+   - Smooth animations (fade/fill effect)
+   - Responsive to window resize
+   - Auto-scale block display (show 10-50 blocks max, aggregate if needed)
+
+6. **Display Information:**
+   - Overall progress bar (traditional)
+   - Block grid visualization
+   - Current file name
+   - Overall compression ratio (live update)
+   - Current speed (MB/s or GB/s)
+   - ETA (estimated time remaining)
+   - Data processed / Total size
+   - Current stage indicator
+
+7. **Implementation Details:**
+   ```cpp
+   class ProgressWidget : public QWidget {
+       Q_OBJECT
+   public:
+       explicit ProgressWidget(QWidget* parent = nullptr);
+       
+   public slots:
+       void setTotalBlocks(int total);
+       void updateBlockProgress(int blockIndex, float progress);
+       void setBlockComplete(int blockIndex, float compressionRatio);
+       void updateOverallProgress(float progress);
+       void updateThroughput(double mbps);
+       void setCurrentStage(const QString& stage);
+       
+   protected:
+       void paintEvent(QPaintEvent* event) override;
+       void resizeEvent(QResizeEvent* event) override;
+       
+   private:
+       struct BlockState {
+           enum Status { Pending, Processing, Complete, Failed };
+           Status status;
+           float progress;      // 0.0 to 1.0
+           float compressionRatio;
+       };
+       
+       QVector<BlockState> m_blocks;
+       float m_overallProgress;
+       double m_throughput;
+       QString m_currentStage;
+       QTimer* m_updateTimer;  // Throttle repaints
+   };
+   ```
+
+**Part 3: Integration with Worker Thread**
+
+8. **Update CompressionWorker:**
+   - Add new signals:
+     ```cpp
+     signals:
+         void totalBlocksChanged(int total);
+         void blockProgressChanged(int block, float progress);
+         void blockCompleted(int block, float ratio);
+         void throughputChanged(double mbps);
+         void stageChanged(QString stage);
+     ```
+   - Connect C API progress callback to emit these signals
+   - Implement callback throttling (emit max 60 times/sec)
+   - Calculate throughput and ETA
+
+9. **Update MainWindow:**
+   - Add ProgressWidget to UI layout
+   - Connect worker signals to ProgressWidget slots
+   - Add settings option: "Show detailed progress" checkbox
+   - Toggle between simple QProgressBar and advanced ProgressWidget
+   - Save preference in QSettings
+
+**Part 4: Performance and Polish**
+
+10. **Throttling and Optimization:**
+    - Core library: Only invoke callback every N blocks or every 100ms
+    - Worker thread: Batch progress updates before emitting
+    - GUI: Use QTimer to batch repaints (16-33ms = 30-60 FPS)
+    - Avoid blocking main thread
+    - Minimal memory overhead
+
+11. **Algorithm-Specific Handling:**
+    - GPU Batched: Natural blocks from batches
+    - GPU Manager: Natural blocks from chunks
+    - CPU Mode: Create virtual blocks based on file size
+    - Small files: Show fewer blocks or single-block mode
+    - Large files: Aggregate blocks for display (show 10-50 max)
+
+12. **Edge Cases:**
+    - Very small files (< 1 block): Show single block
+    - Very large files (1000+ blocks): Aggregate display
+    - Multi-volume: Show volume # + block progress
+    - Cancellation: Mark remaining blocks as "cancelled" (gray)
+    - Errors: Mark failed blocks in red
+
+**Part 5: Testing**
+
+13. **Test Coverage:**
+    - Unit tests for progress callback accuracy
+    - Test callback throttling
+    - Test GUI responsiveness during updates
+    - Measure performance overhead (<1% target)
+    - Test with various file sizes (1 MB to 10 GB)
+    - Test all algorithms
+    - Test cancellation during progress
+
+**Deliverables:**
+1. Core library with block-level progress tracking
+2. Updated C++ and C APIs with progress callbacks
+3. ProgressWidget with block visualization
+4. Integrated into CompressionWorker and MainWindow
+5. Settings to toggle detailed progress
+6. Performance overhead <1%
+7. Comprehensive tests
+
+**Design Inspiration:**
+- Windows 11 file copy dialog (block grid)
+- 7-Zip compression progress
+- Modern download managers (IDM, aria2)
+
+Files to modify/create:
+- @core/src/nvcomp_core.cu
+- @core/src/nvcomp_cpu.cpp
+- @core/include/nvcomp_core.hpp
+- @core/include/nvcomp_c_api.h
+- @core/src/nvcomp_c_api.cpp
+- @gui/src/progress_widget.h (new)
+- @gui/src/progress_widget.cpp (new)
+- @gui/src/compression_worker.h
+- @gui/src/compression_worker.cpp
+- @gui/src/mainwindow.cpp
+- @gui/ui/mainwindow.ui
+
+Provide complete implementation with visual block progress display.
 ```
 
 ---
@@ -2374,12 +2697,12 @@ Provide release checklist, final build scripts, and release announcement templat
 
 - **Phase 1** (Core Refactoring): 8-10 LLM sessions
 - **Phase 2** (Basic Qt GUI): 8-12 LLM sessions
-- **Phase 3** (Advanced Features): 8-10 LLM sessions
+- **Phase 3** (Advanced Features): 10-12 LLM sessions (includes Task 3.5 block progress)
 - **Phase 4** (Windows Integration): 6-8 LLM sessions
 - **Phase 5** (Linux Integration): 8-10 LLM sessions
 - **Phase 6** (Polish & Testing): 10-12 LLM sessions
 
-**Total**: ~50-60 LLM sessions over 8-10 weeks
+**Total**: ~52-64 LLM sessions over 8-10 weeks
 
 ### Success Metrics:
 

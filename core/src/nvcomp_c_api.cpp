@@ -10,6 +10,9 @@
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
+#include <iostream>
+#include <fstream>
+
 
 // ============================================================================
 // Thread-local Error Storage
@@ -297,6 +300,39 @@ nvcomp_error_t nvcomp_compress_gpu_batched(
         );
     });
     
+    return result;
+}
+
+nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
+    const char* output_file,
+    uint64_t max_volume_size
+) {
+    if (!file_paths || file_count == 0 || !output_file) {
+        g_last_error = "Invalid file list or output path";
+        return NVCOMP_ERROR_INVALID_ARGUMENT;
+    }
+    
+    auto result = executeSafely([&]() {
+        std::vector<std::string> paths;
+        paths.reserve(file_count);
+        for (size_t i = 0; i < file_count; i++) {
+            if (file_paths[i]) {
+                paths.emplace_back(file_paths[i]);
+            }
+        }
+        
+        nvcomp_core::compressGPUBatchedFileList(
+            toCorealgo(algo),
+            paths,
+            output_file,
+            max_volume_size
+        );
+    });
+    
     if (result == NVCOMP_SUCCESS && handle) {
         handle->reportProgress(100, 100);
     }
@@ -358,6 +394,43 @@ nvcomp_error_t nvcomp_compress_gpu_manager(
     return result;
 }
 
+nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
+    const char* output_file,
+    uint64_t max_volume_size
+) {
+    if (!file_paths || file_count == 0 || !output_file) {
+        g_last_error = "Invalid file list or output path";
+        return NVCOMP_ERROR_INVALID_ARGUMENT;
+    }
+    
+    auto result = executeSafely([&]() {
+        std::vector<std::string> paths;
+        paths.reserve(file_count);
+        for (size_t i = 0; i < file_count; i++) {
+            if (file_paths[i]) {
+                paths.emplace_back(file_paths[i]);
+            }
+        }
+        
+        nvcomp_core::compressGPUManagerFileList(
+            toCorealgo(algo),
+            paths,
+            output_file,
+            max_volume_size
+        );
+    });
+    
+    if (result == NVCOMP_SUCCESS && handle) {
+        handle->reportProgress(100, 100);
+    }
+    
+    return result;
+}
+
 nvcomp_error_t nvcomp_decompress_gpu_manager(
     nvcomp_operation_handle handle,
     const char* input_file,
@@ -398,6 +471,43 @@ nvcomp_error_t nvcomp_compress_cpu(
         nvcomp_core::compressCPU(
             toCorealgo(algo),
             input_path,
+            output_file,
+            max_volume_size
+        );
+    });
+    
+    if (result == NVCOMP_SUCCESS && handle) {
+        handle->reportProgress(100, 100);
+    }
+    
+    return result;
+}
+
+nvcomp_error_t nvcomp_compress_cpu_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
+    const char* output_file,
+    uint64_t max_volume_size
+) {
+    if (!file_paths || file_count == 0 || !output_file) {
+        g_last_error = "Invalid file list or output path";
+        return NVCOMP_ERROR_INVALID_ARGUMENT;
+    }
+    
+    auto result = executeSafely([&]() {
+        std::vector<std::string> paths;
+        paths.reserve(file_count);
+        for (size_t i = 0; i < file_count; i++) {
+            if (file_paths[i]) {
+                paths.emplace_back(file_paths[i]);
+            }
+        }
+        
+        nvcomp_core::compressCPUFileList(
+            toCorealgo(algo),
+            paths,
             output_file,
             max_volume_size
         );

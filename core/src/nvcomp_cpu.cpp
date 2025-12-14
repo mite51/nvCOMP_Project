@@ -61,8 +61,8 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
 ) {
     std::vector<std::vector<uint8_t>> volumes;
     
-    // If archive fits in single volume, return as-is
-    if (archiveData.size() <= maxVolumeSize) {
+    // If maxVolumeSize is 0 (disabled) or archive fits in single volume, return as-is
+    if (maxVolumeSize == 0 || archiveData.size() <= maxVolumeSize) {
         volumes.push_back(archiveData);
         return volumes;
     }
@@ -409,6 +409,23 @@ void compressCPU(AlgoType algo, const std::string& inputPath, const std::string&
               << (double)totalSize / totalCompressedSize << "x" << std::endl;
     std::cout << "Total time: " << totalDuration << "s (" 
               << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
+}
+
+void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+    std::cout << "Using CPU compression for file list (" << algoToString(algo) << ")..." << std::endl;
+    
+    // Create archive from file list
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    
+    // Write to temporary file
+    std::string tempFile = outputFile + ".tmp_archive";
+    writeFile(tempFile, archiveData.data(), archiveData.size());
+    
+    // Compress the temporary archive file using existing function
+    compressCPU(algo, tempFile, outputFile, maxVolumeSize);
+    
+    // Clean up temporary file
+    std::remove(tempFile.c_str());
 }
 
 void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {

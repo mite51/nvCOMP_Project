@@ -218,6 +218,25 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched(
 );
 
 /**
+ * @brief Compress multiple files using GPU (batched API)
+ * @param handle Operation handle (can be NULL)
+ * @param algo Algorithm to use
+ * @param file_paths Array of file paths to compress
+ * @param file_count Number of files in the array
+ * @param output_file Output compressed file path
+ * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @return Error code
+ */
+NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
+    const char* output_file,
+    uint64_t max_volume_size
+);
+
+/**
  * @brief Decompress file using GPU (batched API)
  * @param handle Operation handle (can be NULL)
  * @param algo Algorithm to use
@@ -250,6 +269,25 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager(
 );
 
 /**
+ * @brief Compress multiple files using GPU (manager API)
+ * @param handle Operation handle (can be NULL)
+ * @param algo Algorithm to use
+ * @param file_paths Array of file paths to compress
+ * @param file_count Number of files in the array
+ * @param output_file Output compressed file path
+ * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @return Error code
+ */
+NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
+    const char* output_file,
+    uint64_t max_volume_size
+);
+
+/**
  * @brief Decompress file using GPU (manager API - auto-detects algorithm)
  * @param handle Operation handle (can be NULL)
  * @param input_file Input compressed file path
@@ -275,6 +313,25 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu(
     nvcomp_operation_handle handle,
     nvcomp_algorithm_t algo,
     const char* input_path,
+    const char* output_file,
+    uint64_t max_volume_size
+);
+
+/**
+ * @brief Compress multiple files using CPU
+ * @param handle Operation handle (can be NULL)
+ * @param algo Algorithm to use
+ * @param file_paths Array of file paths to compress
+ * @param file_count Number of files in the array
+ * @param output_file Output compressed file path
+ * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @return Error code
+ */
+NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu_file_list(
+    nvcomp_operation_handle handle,
+    nvcomp_algorithm_t algo,
+    const char** file_paths,
+    size_t file_count,
     const char* output_file,
     uint64_t max_volume_size
 );

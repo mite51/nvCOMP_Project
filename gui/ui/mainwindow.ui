@@ -232,30 +232,48 @@
           <property name="text">
            <string>LZ4 [GPU] - Fast compression</string>
           </property>
+          <property name="userData" stdset="0">
+           <string>LZ4</string>
+          </property>
          </item>
          <item>
           <property name="text">
            <string>Snappy [GPU] - Very fast compression</string>
+          </property>
+          <property name="userData" stdset="0">
+           <string>Snappy</string>
           </property>
          </item>
          <item>
           <property name="text">
            <string>Zstd [GPU/CPU] - Best compression</string>
           </property>
+          <property name="userData" stdset="0">
+           <string>Zstd</string>
+          </property>
          </item>
          <item>
           <property name="text">
            <string>GDeflate [GPU] - GPU-optimized DEFLATE</string>
+          </property>
+          <property name="userData" stdset="0">
+           <string>GDeflate</string>
           </property>
          </item>
          <item>
           <property name="text">
            <string>ANS [GPU] - Asymmetric Numeral Systems</string>
           </property>
+          <property name="userData" stdset="0">
+           <string>ANS</string>
+          </property>
          </item>
          <item>
           <property name="text">
            <string>Bitcomp [GPU] - Lossless numerical</string>
+          </property>
+          <property name="userData" stdset="0">
+           <string>Bitcomp</string>
           </property>
          </item>
         </widget>
@@ -380,6 +398,9 @@
       </item>
       <item>
        <widget class="QPushButton" name="buttonDecompress">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
         <property name="minimumSize">
          <size>
           <width>0</width>
