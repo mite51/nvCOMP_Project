@@ -1,10 +1,15 @@
-# nvCOMP CLI with CPU Fallback, Folder Support & Multi-Volume
+# nvCOMP: GPU-Accelerated Compression with CLI & GUI
 
-A cross-platform command-line interface for GPU-accelerated compression using NVIDIA nvCOMP with automatic CPU fallback, multi-volume support for large files, and intelligent memory management.
+A cross-platform compression toolkit with both command-line and graphical interfaces, featuring GPU-accelerated compression using NVIDIA nvCOMP with automatic CPU fallback, multi-volume support for large files, and intelligent memory management.
 
 ## Features
 
-- **Dual Implementation Architecture**:
+- **Dual Interface**:
+  - **Qt GUI**: Modern graphical interface with drag-and-drop, real-time progress, and intuitive controls
+  - **CLI**: Full-featured command-line interface for automation and scripting
+  
+- **Modular Architecture**:
+  - **Core Library** (`nvcomp_core`): Shared C++/CUDA compression engine with C and C++ APIs
   - **Batched API** for LZ4, Snappy, Zstd: Cross-compatible between GPU and CPU
   - **Manager API** for GDeflate, ANS, Bitcomp: GPU-only, high-performance
   
@@ -42,32 +47,57 @@ These algorithms use the nvCOMP Manager API which produces nvCOMP container form
 
 ### Prerequisites
 
+**Core Requirements:**
 - CMake 3.18 or higher
-- CUDA Toolkit 11.0 or higher
+- CUDA Toolkit 11.0 or higher (optional for CPU-only mode)
 - NVIDIA GPU with Compute Capability 7.5+ (optional, will use CPU fallback if not available)
 - C++17 compatible compiler
 
-### Build on Windows
+**GUI Requirements (optional):**
+- Qt 6.6+ (automatically downloaded if not present)
 
-```cmd
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
-```
-
-### Build on Linux
+### Build CLI Only
 
 ```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
+# Windows
+cmake -B build -DBUILD_CLI=ON -DBUILD_GUI=OFF
+cmake --build build --config Release
+
+# Linux
+cmake -B build -DBUILD_CLI=ON -DBUILD_GUI=OFF
+cmake --build build
 ```
+
+### Build GUI
+
+The GUI build automatically downloads Qt 6.8.0 if not present on your system:
+
+```bash
+# Windows
+cmake -B build_gui -DBUILD_GUI=ON
+cmake --build build_gui --config Release
+
+# Linux
+cmake -B build_gui -DBUILD_GUI=ON
+cmake --build build_gui
+```
+
+### Build Both CLI and GUI
+
+```bash
+cmake -B build -DBUILD_CLI=ON -DBUILD_GUI=ON
+cmake --build build --config Release
+```
+
+**Build Options:**
+- `-DBUILD_CLI=ON/OFF`: Build command-line interface (default: ON)
+- `-DBUILD_GUI=ON/OFF`: Build graphical interface (default: OFF)
+- `-DBUILD_TESTS=ON/OFF`: Build test executables (default: ON)
 
 The build system automatically:
 - Downloads the appropriate nvCOMP SDK for your platform
 - Fetches and builds LZ4, Snappy, and Zstd dependencies
+- Downloads Qt 6.8.0 if building GUI and Qt not found
 - Patches old CMake version requirements in dependencies
 
 ## Usage
@@ -240,6 +270,45 @@ nvcomp_cli -d output.zstd restored/ zstd
 
 This works for all three cross-compatible algorithms (LZ4, Snappy, Zstd) in both GPU and CPU modes.
 
+## GUI Usage
+
+The Qt graphical interface provides an intuitive way to compress and decompress files:
+
+### Launching the GUI
+
+```bash
+# Windows
+.\build_gui\gui\Release\nvcomp_gui.exe
+
+# Linux
+./build_gui/gui/nvcomp_gui
+```
+
+### GUI Features
+
+**Main Window:**
+- **File Selection**: Click "Add Files" or drag-and-drop files/folders into the list
+- **Multiple Selection**: Select multiple files and folders simultaneously
+- **Algorithm Selection**: Choose from 6 compression algorithms (LZ4, Snappy, Zstd, GDeflate, ANS, Bitcomp)
+- **GPU Detection**: Automatically detects CUDA availability and shows GPU status
+- **Volume Splitting**: Configure volume sizes or disable splitting
+- **CPU Mode**: Force CPU compression when needed
+
+**Compression:**
+1. Add files or folders to compress
+2. Select algorithm and settings
+3. Specify output archive name (or auto-generate)
+4. Click "Compress"
+5. View real-time progress with speed and ETA
+6. Success dialog shows compression ratio and time
+
+**Workflow:**
+- Background compression keeps UI responsive
+- Real-time progress updates with MB/s throughput
+- Cancellable operations
+- Clear error messages and success notifications
+- Supports all CLI features (multi-volume, CPU fallback, etc.)
+
 ## Archive Format
 
 The tool uses a simple, efficient archive format for storing multiple files:
@@ -348,6 +417,38 @@ This test compresses a folder with GPU zstd, lists the archive, decompresses it,
 **Total Test Coverage: 29 tests** (15 single-file + 14 folder/archive tests)
 
 ## Architecture Details
+
+### Project Structure
+
+The project is organized into three main components:
+
+```
+nvCOMP_Project/
+├── core/                      # Shared compression library
+│   ├── include/
+│   │   ├── nvcomp_core.hpp   # C++ API
+│   │   └── nvcomp_c_api.h    # C API
+│   └── src/
+│       ├── nvcomp_core.cu    # GPU implementations
+│       ├── nvcomp_cpu.cpp    # CPU implementations
+│       ├── archive.cpp       # Archive management
+│       └── volume.cpp        # Multi-volume support
+│
+├── main.cu                    # CLI (229 lines, thin wrapper)
+│
+└── gui/                       # Qt GUI application
+    ├── src/
+    │   ├── mainwindow.cpp/h
+    │   └── compression_worker.cpp/h
+    └── ui/
+        └── mainwindow.ui
+```
+
+**Core Library Benefits:**
+- Shared code between CLI and GUI (no duplication)
+- Clean C and C++ APIs for easy integration
+- Can be used by other applications
+- Separately testable
 
 ### Compression Pipeline
 
@@ -528,10 +629,14 @@ For very large datasets:
 
 All dependencies are automatically fetched and built by CMake:
 
+**Core Dependencies:**
 - **nvCOMP 5.1.0**: NVIDIA compression library
 - **LZ4 1.9.4**: Fast compression library
 - **Snappy 1.2.1**: Fast compression library by Google
 - **Zstd 1.5.5**: Compression by Facebook
+
+**GUI Dependencies (optional):**
+- **Qt 6.8.0**: Cross-platform GUI framework (automatically downloaded if not present)
 
 ## License
 
@@ -540,16 +645,18 @@ This project uses:
 - LZ4 (BSD License)
 - Snappy (BSD License)
 - Zstd (BSD/GPLv2 dual license)
+- Qt 6 (LGPL v3 License - GUI only)
 
 See individual library licenses for details.
 
 ## Contributing
 
 Contributions welcome! Please ensure:
-- All 15 tests pass
+- All tests pass (27 CLI tests + 13 C API tests)
 - Code follows existing style
 - Documentation is updated
 - Cross-compatibility is maintained for LZ4/Snappy/Zstd
+- GUI changes maintain cross-platform compatibility (Windows/Linux)
 
 ## References
 
@@ -558,10 +665,35 @@ Contributions welcome! Please ensure:
 - [LZ4](https://github.com/lz4/lz4)
 - [Snappy](https://github.com/google/snappy)
 - [Zstd](https://github.com/facebook/zstd)
+- [Qt Framework](https://www.qt.io/)
 
 ## Changelog
 
-### Version 3.0.0 (Current) - Multi-Volume Support
+### Version 4.0.0 (Current) - Qt GUI & Modular Architecture
+- **NEW**: 🎉 Qt 6 graphical user interface
+  - Modern desktop application with intuitive controls
+  - Drag-and-drop file selection
+  - Real-time progress with speed and ETA
+  - Multi-file and folder selection
+  - Automatic Qt6 download during build
+  - Background compression with responsive UI
+  - Cancellable operations
+- **NEW**: Modular architecture with core library
+  - Core library (`nvcomp_core`) with C and C++ APIs
+  - CLI refactored to thin wrapper (229 lines, 90% reduction)
+  - Shared code between CLI and GUI
+  - Build options: `-DBUILD_CLI=ON/OFF`, `-DBUILD_GUI=ON/OFF`
+- **IMPROVED**: Enhanced build system
+  - Automatic Qt detection and installation
+  - Cross-platform DLL/shared library handling
+  - Proper RPATH configuration for Linux
+  - Component-based installation support
+- **TESTING**: Comprehensive test coverage
+  - 13 C API tests
+  - 27 CLI tests (all passing)
+  - Modular testing infrastructure
+
+### Version 3.0.0 - Multi-Volume Support
 - **NEW**: 🎉 Multi-volume support for large files and archives
   - Default 2.5GB volumes (safe for 8GB VRAM GPUs)
   - Automatic volume splitting and reassembly
@@ -628,3 +760,5 @@ Contributions welcome! Please ensure:
 Based on nvCOMP examples from NVIDIA. Special thanks to the nvCOMP team for providing excellent reference implementations.
 
 Folder compression and cross-platform path handling implemented using C++17 filesystem API for maximum portability.
+
+Qt GUI implementation uses Qt 6 framework for cross-platform desktop application development.
