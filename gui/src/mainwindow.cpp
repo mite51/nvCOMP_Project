@@ -6,6 +6,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "compression_worker.h"
+#include "archive_viewer.h"
 #include <QMessageBox>
 #include <QApplication>
 #include <QFileDialog>
@@ -20,6 +21,7 @@
 #include <QTreeView>
 #include <QAbstractItemView>
 #include <QEvent>
+#include <QListWidgetItem>
 
 // Helper class to keep the file dialog button always enabled
 class ButtonEnabledFilter : public QObject
@@ -110,6 +112,15 @@ void MainWindow::setupConnections()
         connect(ui->actionAddFiles, &QAction::triggered,
                 this, &MainWindow::onAddFilesClicked);
     }
+    
+    if (ui->actionViewArchive) {
+        connect(ui->actionViewArchive, &QAction::triggered,
+                this, &MainWindow::onViewArchiveTriggered);
+    }
+    
+    // Connect file list double-click
+    connect(ui->listWidgetFiles, &QListWidget::itemDoubleClicked,
+            this, &MainWindow::onFileListDoubleClicked);
     
     // Connect file buttons
     connect(ui->buttonAddFiles, &QPushButton::clicked,
@@ -756,6 +767,62 @@ void MainWindow::onWorkerCanceled()
 void MainWindow::onWorkerStatusMessage(const QString &message)
 {
     statusBar()->showMessage(message, 3000);
+}
+
+void MainWindow::onViewArchiveTriggered()
+{
+    // Open file dialog to select archive
+    QString archivePath = QFileDialog::getOpenFileName(
+        this,
+        tr("Select Archive to View"),
+        QString(),
+        tr("nvCOMP Archives (*.nvcomp *.nvcomp.*);;All Files (*.*)")
+    );
+    
+    if (archivePath.isEmpty()) {
+        return;  // User canceled
+    }
+    
+    // Check if file exists
+    if (!QFile::exists(archivePath)) {
+        QMessageBox::warning(this, tr("File Not Found"),
+            tr("The selected archive file does not exist:\n%1").arg(archivePath));
+        return;
+    }
+    
+    // Open archive viewer dialog
+    ArchiveViewerDialog dialog(archivePath, this);
+    dialog.exec();
+}
+
+void MainWindow::onFileListDoubleClicked(QListWidgetItem* item)
+{
+    if (!item) {
+        return;
+    }
+    
+    QString filePath = item->text();
+    QFileInfo fileInfo(filePath);
+    
+    // Check if this is a compressed archive file
+    QString suffix = fileInfo.suffix().toLower();
+    QString fileName = fileInfo.fileName().toLower();
+    
+    // Check for archive extensions
+    bool isArchive = suffix == "nvcomp" || 
+                     fileName.contains(".nvcomp.") ||
+                     fileName.endsWith(".nvcomp");
+    
+    if (isArchive) {
+        // Open archive viewer
+        ArchiveViewerDialog dialog(filePath, this);
+        dialog.exec();
+    } else {
+        // For non-archive files, show info message
+        QMessageBox::information(this, tr("File Info"),
+            tr("File: %1\n\nDouble-click archive files (*.nvcomp) to view their contents.")
+                .arg(fileInfo.fileName()));
+    }
 }
 
 

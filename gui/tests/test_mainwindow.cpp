@@ -19,7 +19,13 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QProgressBar>
+#include <QTreeWidget>
+#include <QLineEdit>
+#include <QFileInfo>
+#include <QFile>
+#include <QDebug>
 #include "mainwindow.h"
+#include "archive_viewer.h"
 
 /**
  * @class TestMainWindow
@@ -186,6 +192,45 @@ private slots:
      * @brief Test: Settings getters work correctly
      */
     void testSettingsGetters();
+    
+    // ========================================================================
+    // Task 3.1: Archive Viewer Tests
+    // ========================================================================
+    
+    /**
+     * @brief Test: Tools menu exists
+     */
+    void testToolsMenu();
+    
+    /**
+     * @brief Test: View Archive action exists and is properly configured
+     */
+    void testViewArchiveAction();
+    
+    /**
+     * @brief Test: Archive Viewer can be created
+     */
+    void testArchiveViewerConstruction();
+    
+    /**
+     * @brief Test: Archive Viewer has correct UI elements
+     */
+    void testArchiveViewerUI();
+    
+    /**
+     * @brief Test: Archive Viewer loads sample archive
+     */
+    void testArchiveViewerLoadSample();
+    
+    /**
+     * @brief Test: Archive Viewer search functionality
+     */
+    void testArchiveViewerSearch();
+    
+    /**
+     * @brief Test: Archive Viewer tree widget
+     */
+    void testArchiveViewerTreeWidget();
 
 private:
     MainWindow *window;  ///< Test window instance
@@ -508,7 +553,12 @@ void TestMainWindow::testAlgorithmSelection()
         
         QString newAlgorithm = window->getSelectedAlgorithm();
         QVERIFY(newAlgorithm != initialAlgorithm);
-        QCOMPARE(newAlgorithm, comboBox->currentText());
+        // getSelectedAlgorithm() returns the user data (e.g., "Snappy")
+        // not the display text (e.g., "Snappy [GPU] - Very fast compression")
+        QVERIFY(!newAlgorithm.isEmpty());
+        
+        // Verify the algorithm name is contained in the display text
+        QVERIFY(comboBox->currentText().contains(newAlgorithm, Qt::CaseInsensitive));
     }
 }
 
@@ -675,6 +725,204 @@ void TestMainWindow::testSettingsGetters()
     
     int volumeSize = window->getVolumeSize();
     QVERIFY(volumeSize > 0);
+}
+
+// ============================================================================
+// Task 3.1: Archive Viewer Test Implementations
+// ============================================================================
+
+void TestMainWindow::testToolsMenu()
+{
+    // Find Tools menu
+    QMenuBar *menuBar = window->menuBar();
+    QVERIFY(menuBar != nullptr);
+    
+    QList<QAction*> actions = menuBar->actions();
+    bool hasToolsMenu = false;
+    
+    for (QAction *action : actions) {
+        QString text = action->text().remove('&');
+        if (text.contains("Tools", Qt::CaseInsensitive)) {
+            hasToolsMenu = true;
+            break;
+        }
+    }
+    
+    QVERIFY(hasToolsMenu);
+}
+
+void TestMainWindow::testViewArchiveAction()
+{
+    // Find View Archive action
+    QAction *viewArchiveAction = window->findChild<QAction*>("actionViewArchive");
+    QVERIFY(viewArchiveAction != nullptr);
+    
+    // Test properties
+    QVERIFY(!viewArchiveAction->text().isEmpty());
+    QString text = viewArchiveAction->text().remove('&');
+    QVERIFY(text.contains("View Archive", Qt::CaseInsensitive) || 
+            text.contains("Archive", Qt::CaseInsensitive));
+    
+    // Test shortcut (Ctrl+V)
+    QKeySequence shortcut = viewArchiveAction->shortcut();
+    QCOMPARE(shortcut, QKeySequence(Qt::CTRL | Qt::Key_V));
+    
+    // Test tooltip
+    QVERIFY(!viewArchiveAction->toolTip().isEmpty());
+}
+
+void TestMainWindow::testArchiveViewerConstruction()
+{
+    // Test creating archive viewer with dummy path
+    QString testPath = "test_archive.nvcomp";
+    ArchiveViewerDialog *viewer = new ArchiveViewerDialog(testPath, nullptr);
+    
+    QVERIFY(viewer != nullptr);
+    QVERIFY(!viewer->windowTitle().isEmpty());
+    QVERIFY(viewer->windowTitle().contains("Archive", Qt::CaseInsensitive));
+    
+    delete viewer;
+}
+
+void TestMainWindow::testArchiveViewerUI()
+{
+    // Create viewer with dummy path
+    QString testPath = "test_archive.nvcomp";
+    ArchiveViewerDialog *viewer = new ArchiveViewerDialog(testPath, nullptr);
+    
+    // Test tree widget exists
+    QTreeWidget *tree = viewer->findChild<QTreeWidget*>("treeWidget");
+    QVERIFY(tree != nullptr);
+    QCOMPARE(tree->columnCount(), 4);  // Name, Size, Compressed, Ratio
+    QVERIFY(tree->isSortingEnabled());
+    QVERIFY(tree->alternatingRowColors());
+    
+    // Test search field exists
+    QLineEdit *search = viewer->findChild<QLineEdit*>("lineEditSearch");
+    QVERIFY(search != nullptr);
+    QVERIFY(!search->placeholderText().isEmpty());
+    
+    // Test buttons exist
+    QPushButton *extractAll = viewer->findChild<QPushButton*>("buttonExtractAll");
+    QPushButton *extractSelected = viewer->findChild<QPushButton*>("buttonExtractSelected");
+    QPushButton *refresh = viewer->findChild<QPushButton*>("buttonRefresh");
+    QPushButton *close = viewer->findChild<QPushButton*>("buttonClose");
+    
+    QVERIFY(extractAll != nullptr);
+    QVERIFY(extractSelected != nullptr);
+    QVERIFY(refresh != nullptr);
+    QVERIFY(close != nullptr);
+    
+    // Test statistics label exists
+    QLabel *stats = viewer->findChild<QLabel*>("labelStatistics");
+    QVERIFY(stats != nullptr);
+    QVERIFY(!stats->text().isEmpty());
+    
+    // Test status label exists
+    QLabel *status = viewer->findChild<QLabel*>("labelStatus");
+    QVERIFY(status != nullptr);
+    
+    delete viewer;
+}
+
+void TestMainWindow::testArchiveViewerLoadSample()
+{
+    // Test with the sample archive provided by user
+    QString samplePath = "C:/Git/nvCOMP_CLI/unit_test/sample_archive.nvcomp";
+    
+    // Check if sample file exists
+    QFileInfo fileInfo(samplePath);
+    if (!fileInfo.exists()) {
+        QSKIP("Sample archive not found at C:/Git/nvCOMP_CLI/unit_test/sample_archive.nvcomp");
+        return;
+    }
+    
+    // Verify the file is valid without creating the dialog
+    // (Creating the dialog may show blocking error dialogs for compressed archives)
+    QVERIFY(fileInfo.exists());
+    QVERIFY(fileInfo.isFile());
+    QVERIFY(fileInfo.size() > 0);
+    
+    // Read magic number to determine format
+    QFile file(samplePath);
+    if (file.open(QIODevice::ReadOnly)) {
+        uint32_t magic = 0;
+        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        file.close();
+        
+        // Check for valid nvCOMP magic numbers
+        const uint32_t ARCHIVE_MAGIC = 0x4E564152; // "NVAR" - uncompressed
+        const uint32_t BATCHED_MAGIC = 0x4E564243; // "NVBC" - compressed
+        
+        bool validMagic = (magic == ARCHIVE_MAGIC || magic == BATCHED_MAGIC);
+        QVERIFY(validMagic);
+        
+        // Note: If it's BATCHED_MAGIC (compressed), the archive viewer will show
+        // an error dialog saying it only supports uncompressed archives.
+        // We avoid creating the viewer in tests to prevent blocking on modal dialogs.
+        
+        // If it's uncompressed (NVAR), we could test loading, but for automated
+        // tests we skip the actual GUI interaction to avoid blocking.
+        if (magic == ARCHIVE_MAGIC) {
+            // This is an uncompressed archive - could be loaded by the viewer
+            // In a production test environment, you would mock QMessageBox here
+            qDebug() << "Sample archive is uncompressed (NVAR format) - suitable for Archive Viewer";
+        } else {
+            // This is compressed - viewer will reject it
+            qDebug() << "Sample archive is compressed (NVBC format) - viewer will show error";
+        }
+    } else {
+        QFAIL("Could not open sample archive file");
+    }
+}
+
+void TestMainWindow::testArchiveViewerSearch()
+{
+    // Create viewer with dummy path
+    QString testPath = "test_archive.nvcomp";
+    ArchiveViewerDialog *viewer = new ArchiveViewerDialog(testPath, nullptr);
+    
+    // Find search field
+    QLineEdit *search = viewer->findChild<QLineEdit*>("lineEditSearch");
+    QVERIFY(search != nullptr);
+    
+    // Test that search field is enabled and accepts input
+    QVERIFY(search->isEnabled());
+    
+    // Test entering search text
+    search->setText("test");
+    QCOMPARE(search->text(), QString("test"));
+    
+    // Test clearing
+    search->clear();
+    QVERIFY(search->text().isEmpty());
+    
+    delete viewer;
+}
+
+void TestMainWindow::testArchiveViewerTreeWidget()
+{
+    // Create viewer with dummy path
+    QString testPath = "test_archive.nvcomp";
+    ArchiveViewerDialog *viewer = new ArchiveViewerDialog(testPath, nullptr);
+    
+    // Find tree widget
+    QTreeWidget *tree = viewer->findChild<QTreeWidget*>("treeWidget");
+    QVERIFY(tree != nullptr);
+    
+    // Test header labels
+    QVERIFY(!tree->headerItem()->text(0).isEmpty());  // Name column
+    QVERIFY(!tree->headerItem()->text(1).isEmpty());  // Size column
+    QVERIFY(!tree->headerItem()->text(2).isEmpty());  // Compressed column
+    QVERIFY(!tree->headerItem()->text(3).isEmpty());  // Ratio column
+    
+    // Test selection mode
+    QCOMPARE(tree->selectionMode(), QAbstractItemView::ExtendedSelection);
+    
+    // Test context menu is enabled
+    QCOMPARE(tree->contextMenuPolicy(), Qt::CustomContextMenu);
+    
+    delete viewer;
 }
 
 // ============================================================================

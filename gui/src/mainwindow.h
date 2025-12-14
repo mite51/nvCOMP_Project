@@ -17,6 +17,7 @@ namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
 
 class CompressionWorker;
+class QListWidgetItem;
 
 /**
  * @class MainWindow
@@ -247,6 +248,19 @@ private slots:
      * @param message Status message for display
      */
     void onWorkerStatusMessage(const QString &message);
+    
+    /**
+     * @brief Handles View Archive menu action
+     * Opens archive viewer dialog for a selected archive file
+     */
+    void onViewArchiveTriggered();
+    
+    /**
+     * @brief Handles double-click on file list items
+     * Opens archive viewer if the file is a compressed archive
+     * @param item The item that was double-clicked
+     */
+    void onFileListDoubleClicked(QListWidgetItem* item);
 };
 
 #endif // MAINWINDOW_H

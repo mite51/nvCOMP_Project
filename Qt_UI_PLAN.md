@@ -1304,7 +1304,7 @@ Provide complete implementation of compress/decompress workflow.
 ### **Prompt for Task 3.1: Implement Archive Viewer**
 
 ```
-I need to create a dialog that displays the contents of a compressed archive without extracting it, similar to how WinRAR or 7-Zip works.
+I need to create a dialog that displays the contents of a compressed archive, with an option to extract it, similar to how WinRAR or 7-Zip works.
 
 Requirements:
 

@@ -31,15 +31,18 @@ set(GUI_SOURCES
     src/main.cpp
     src/mainwindow.cpp
     src/compression_worker.cpp
+    src/archive_viewer.cpp
 )
 
 set(GUI_HEADERS
     src/mainwindow.h
     src/compression_worker.h
+    src/archive_viewer.h
 )
 
 set(GUI_UI_FILES
     ui/mainwindow.ui
+    ui/archive_viewer.ui
 )
 
 set(GUI_RESOURCES
@@ -158,6 +161,7 @@ if(BUILD_TESTS)
         tests/test_mainwindow.cpp
         src/mainwindow.cpp  # Include source to test
         src/compression_worker.cpp  # Include worker source
+        src/archive_viewer.cpp  # Include archive viewer source
     )
     
     target_include_directories(test_mainwindow PRIVATE
