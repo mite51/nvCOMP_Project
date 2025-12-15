@@ -8,6 +8,12 @@
 #include <iostream>
 #include <string>
 #include <cstring>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 // Include the C API from the core library
 #include "nvcomp_c_api.h"
@@ -15,6 +21,20 @@
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+#ifdef _WIN32
+// Convert UTF-16 (wide char) to UTF-8 on Windows
+std::string wideToUtf8(const wchar_t* wstr) {
+    if (!wstr) return "";
+    
+    int size = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return "";
+    
+    std::vector<char> buffer(size);
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, buffer.data(), size, nullptr, nullptr);
+    return std::string(buffer.data());
+}
+#endif
 
 void printUsage(const char* appName) {
     std::cerr << "nvCOMP CLI with CPU Fallback & Multi-Volume Support\n\n";
@@ -64,7 +84,27 @@ void printError(const char* message) {
 // Main Entry Point
 // ============================================================================
 
+#ifdef _WIN32
+// Windows entry point with Unicode support
+int wmain(int argc, wchar_t** wargv) {
+    // Convert wide char arguments to UTF-8
+    std::vector<std::string> utf8Args;
+    std::vector<char*> argv;
+    
+    utf8Args.reserve(argc);
+    argv.reserve(argc);
+    
+    for (int i = 0; i < argc; i++) {
+        utf8Args.push_back(wideToUtf8(wargv[i]));
+        argv.push_back(const_cast<char*>(utf8Args[i].c_str()));
+    }
+    
+    // Set console output to UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+#else
+// Standard entry point for non-Windows platforms
 int main(int argc, char** argv) {
+#endif
     try {
         if (argc < 3) {
             printUsage(argv[0]);

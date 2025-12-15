@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 
 // Windows DLL export/import macros
 #ifdef _WIN32
@@ -110,10 +111,18 @@ NVCOMP_CORE_API bool isCudaAvailable();
 // File I/O Utilities
 // ============================================================================
 
+// fs::path overloads for proper Unicode handling on Windows
+NVCOMP_CORE_API std::vector<uint8_t> readFile(const std::filesystem::path& filepath);
+NVCOMP_CORE_API void writeFile(const std::filesystem::path& filepath, const void* data, size_t size);
+NVCOMP_CORE_API void writeFile(const std::filesystem::path& filepath, const void* data, size_t size, ProgressCallback callback);
+
+// String overloads for backward compatibility
 NVCOMP_CORE_API std::vector<uint8_t> readFile(const std::string& filename);
 NVCOMP_CORE_API void writeFile(const std::string& filename, const void* data, size_t size);
 NVCOMP_CORE_API void writeFile(const std::string& filename, const void* data, size_t size, ProgressCallback callback);
 NVCOMP_CORE_API std::string normalizePath(const std::string& path);
+NVCOMP_CORE_API std::string normalizePath(const std::filesystem::path& path);
+NVCOMP_CORE_API std::string getRelativePath(const std::filesystem::path& path, const std::filesystem::path& base);
 NVCOMP_CORE_API std::string getRelativePath(const std::string& path, const std::string& base);
 NVCOMP_CORE_API bool isDirectory(const std::string& path);
 NVCOMP_CORE_API void createDirectories(const std::string& path);

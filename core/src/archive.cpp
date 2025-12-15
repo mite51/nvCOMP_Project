@@ -15,10 +15,12 @@ namespace nvcomp_core {
 // File I/O Utilities
 // ============================================================================
 
-std::vector<uint8_t> readFile(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+// Helper overload that accepts fs::path directly (avoids Unicode conversion issues)
+std::vector<uint8_t> readFile(const fs::path& filepath) {
+    // Use filesystem::path directly to properly handle Unicode paths on Windows
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open input file: " + filename);
+        throw std::runtime_error("Failed to open input file: " + filepath.string());
     }
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
@@ -27,17 +29,20 @@ std::vector<uint8_t> readFile(const std::string& filename) {
     if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
         return buffer;
     }
-    throw std::runtime_error("Failed to read file: " + filename);
+    throw std::runtime_error("Failed to read file: " + filepath.string());
 }
 
-void writeFile(const std::string& filename, const void* data, size_t size) {
-    writeFile(filename, data, size, nullptr);
+// String overload for backward compatibility
+std::vector<uint8_t> readFile(const std::string& filename) {
+    return readFile(fs::path(filename));
 }
 
-void writeFile(const std::string& filename, const void* data, size_t size, ProgressCallback callback) {
-    std::ofstream file(filename, std::ios::binary);
+// Helper overload that accepts fs::path directly (avoids Unicode conversion issues)
+void writeFile(const fs::path& filepath, const void* data, size_t size, ProgressCallback callback) {
+    // Use filesystem::path directly to properly handle Unicode paths on Windows
+    std::ofstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open output file: " + filename);
+        throw std::runtime_error("Failed to open output file: " + filepath.string());
     }
     
     // If no callback or small file, write all at once
@@ -74,17 +79,43 @@ void writeFile(const std::string& filename, const void* data, size_t size, Progr
     }
 }
 
+void writeFile(const fs::path& filepath, const void* data, size_t size) {
+    writeFile(filepath, data, size, nullptr);
+}
+
+// String overloads for backward compatibility
+void writeFile(const std::string& filename, const void* data, size_t size) {
+    writeFile(fs::path(filename), data, size, nullptr);
+}
+
+void writeFile(const std::string& filename, const void* data, size_t size, ProgressCallback callback) {
+    writeFile(fs::path(filename), data, size, callback);
+}
+
 std::string normalizePath(const std::string& path) {
     std::string normalized = path;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
     return normalized;
 }
 
+// fs::path overload for proper Unicode handling
+std::string normalizePath(const fs::path& path) {
+    // Use u8string() to get UTF-8 encoding which preserves Unicode characters
+    std::string normalized = path.generic_u8string();
+    return normalized;
+}
+
+// fs::path overload for proper Unicode handling
+std::string getRelativePath(const fs::path& path, const fs::path& base) {
+    fs::path relativePath = fs::relative(path, base);
+    // Use u8string() to properly preserve Unicode characters
+    std::string u8str = relativePath.u8string();
+    return normalizePath(u8str);
+}
+
+// String overload for backward compatibility
 std::string getRelativePath(const std::string& path, const std::string& base) {
-    fs::path fsPath(path);
-    fs::path fsBase(base);
-    fs::path relativePath = fs::relative(fsPath, fsBase);
-    return normalizePath(relativePath.string());
+    return getRelativePath(fs::path(path), fs::path(base));
 }
 
 bool isDirectory(const std::string& path) {
@@ -166,14 +197,14 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
     uint64_t processedSize = 0;
     for (size_t i = 0; i < files.size(); i++) {
         const auto& filePath = files[i];
-        std::string relativePath = getRelativePath(filePath.string(), basePath.string());
+        std::string relativePath = getRelativePath(filePath, basePath);
         if (relativePath.empty() || relativePath == ".") {
             relativePath = filePath.filename().string();
         }
         
         std::cout << "  Adding: " << relativePath << std::flush;
         
-        auto fileData = readFile(filePath.string());
+        auto fileData = readFile(filePath);
         
         FileEntry entry;
         entry.pathLength = static_cast<uint32_t>(relativePath.length());
@@ -331,14 +362,14 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
     uint64_t processedSize = 0;
     for (size_t i = 0; i < allFiles.size(); i++) {
         const auto& fileWithBase = allFiles[i];
-        std::string relativePath = getRelativePath(fileWithBase.filePath.string(), fileWithBase.basePath.string());
+        std::string relativePath = getRelativePath(fileWithBase.filePath, fileWithBase.basePath);
         if (relativePath.empty() || relativePath == ".") {
             relativePath = fileWithBase.filePath.filename().string();
         }
         
         std::cout << "  Adding: " << relativePath << std::flush;
         
-        auto fileData = readFile(fileWithBase.filePath.string());
+        auto fileData = readFile(fileWithBase.filePath);
         
         FileEntry entry;
         entry.pathLength = static_cast<uint32_t>(relativePath.length());
@@ -437,7 +468,7 @@ void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& 
         createDirectories(fullPath.string());
         
         // Write file
-        writeFile(fullPath.string(), archiveData.data() + offset, entry.fileSize);
+        writeFile(fullPath, archiveData.data() + offset, entry.fileSize);
         offset += entry.fileSize;
     }
     

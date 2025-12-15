@@ -101,7 +101,8 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
 // ============================================================================
 
 AlgoType detectAlgorithmFromFile(const std::string& filename) {
-    std::ifstream file(filename, std::ios::binary);
+    // Use filesystem::path to properly handle Unicode paths on Windows
+    std::ifstream file(fs::path(filename), std::ios::binary);
     if (!file.is_open()) {
         return ALGO_UNKNOWN;
     }
