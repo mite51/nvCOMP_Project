@@ -143,6 +143,20 @@ gui/ui/mainwindow.ui - Settings action in Tools menu
 gui/CMakeLists.txt - Build integration
 gui/tests/test_mainwindow.cpp - 10 new test cases
 =========================================================================
+Task 3.3 
+
+We're doing LLM task sprints, small focused changes in a broader plan, so keep changes in scope.
+starting with Task 3.3, please grok that then consider if additional information or clarity is needed. Otherwise, please proceed with the task.
+
+<ui plan>
+<summary 3.2>
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================
 
 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
