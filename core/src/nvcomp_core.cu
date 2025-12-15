@@ -127,7 +127,8 @@ AlgoType detectAlgorithmFromFile(const std::string& filename) {
 
 // Internal function that compresses in-memory archive data
 static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_t>& archiveData, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize) {
+                                         const std::string& outputFile, uint64_t maxVolumeSize,
+                                         ProgressCallback callback = nullptr) {
     std::cout << "Using GPU batched compression (" << algoToString(algo) << ")..." << std::endl;
     
     size_t totalSize = archiveData.size();
@@ -147,6 +148,21 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     // Calculate chunks
     size_t chunk_count = (inputSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
     std::cout << "Chunks: " << chunk_count << std::endl;
+    
+    // Report total blocks and preparing stage if callback provided
+    // (Reading phase is complete at this point, reported by createArchive functions)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(chunk_count);
+        info.completedBlocks = 0;
+        info.currentBlock = 0;
+        info.currentBlockSize = 0;
+        info.overallProgress = 0.25f;  // Reading complete (0-25%), now preparing (25%)
+        info.currentBlockProgress = 0.0f;
+        info.throughputMBps = 0.0;
+        info.stage = "preparing";
+        callback(info);
+    }
     
     // Prepare input chunks on host
     std::vector<void*> h_input_ptrs(chunk_count);
@@ -213,6 +229,20 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     }
     CUDA_CHECK(cudaMemcpy(d_output_ptrs, h_output_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
     
+    // Report compressing stage (25% allocated for reading/preparing)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(chunk_count);
+        info.completedBlocks = 0;
+        info.currentBlock = 0;
+        info.currentBlockSize = CHUNK_SIZE;
+        info.overallProgress = 0.25f;  // 25% for reading/preparing
+        info.currentBlockProgress = 0.0f;
+        info.throughputMBps = 0.0;
+        info.stage = "compressing";
+        callback(info);
+    }
+    
     auto start = std::chrono::high_resolution_clock::now();
     
     // Compress
@@ -246,10 +276,31 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
         totalCompSize += h_output_sizes[i];
     }
     
+    // Calculate throughput and duration
+    double duration = std::chrono::duration<double>(end - start).count();
+    double throughputMBps = (inputSize / (1024.0 * 1024.0)) / duration;
+    
     std::cout << "Compressed size: " << totalCompSize << " bytes" << std::endl;
     std::cout << "Ratio: " << std::fixed << std::setprecision(2) << (double)inputSize / totalCompSize << "x" << std::endl;
-    double duration = std::chrono::duration<double>(end - start).count();
     std::cout << "Time: " << duration << "s (" << (inputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)" << std::endl;
+    
+    // Report all blocks as completed (scale to 25%-75% range)
+    if (callback) {
+        for (size_t i = 0; i < chunk_count; i++) {
+            BlockProgressInfo info;
+            info.totalBlocks = static_cast<int>(chunk_count);
+            info.completedBlocks = static_cast<int>(i + 1);
+            info.currentBlock = static_cast<int>(i);
+            info.currentBlockSize = h_input_sizes[i];
+            // Scale compression progress to 25%-75% range
+            float compressProgress = (float)(i + 1) / chunk_count;
+            info.overallProgress = 0.25f + (compressProgress * 0.5f);  // 25% to 75%
+            info.currentBlockProgress = 1.0f;
+            info.throughputMBps = throughputMBps;
+            info.stage = "compressing";
+            callback(info);
+        }
+    }
     
     // Create output with metadata
     std::vector<uint8_t> outputData;
@@ -287,7 +338,35 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     size_t totalSizeWithMeta = outputData.size();
     std::cout << "Total size with metadata: " << totalSizeWithMeta << " bytes" << std::endl;
     
-    writeFile(outputFile, outputData.data(), outputData.size());
+    // Report writing stage (75% - start of writing phase)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(chunk_count);
+        info.completedBlocks = static_cast<int>(chunk_count);
+        info.currentBlock = static_cast<int>(chunk_count - 1);
+        info.currentBlockSize = 0;
+        info.overallProgress = 0.75f;  // Writing starts at 75%
+        info.currentBlockProgress = 1.0f;
+        info.throughputMBps = throughputMBps;
+        info.stage = "writing";
+        callback(info);
+    }
+    
+    writeFile(outputFile, outputData.data(), outputData.size(), callback);
+    
+    // Report completion (100%)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(chunk_count);
+        info.completedBlocks = static_cast<int>(chunk_count);
+        info.currentBlock = static_cast<int>(chunk_count - 1);
+        info.currentBlockSize = 0;
+        info.overallProgress = 1.0f;  // 100% complete
+        info.currentBlockProgress = 1.0f;
+        info.throughputMBps = throughputMBps;
+        info.stage = "complete";
+        callback(info);
+    }
     
     // Cleanup
     cudaFree(d_input_data);
@@ -329,6 +408,21 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     for (size_t vol_idx = 0; vol_idx < volumes.size(); vol_idx++) {
         // Show progress on single line
         std::cout << "\r  Processing volume " << (vol_idx + 1) << "/" << volumes.size() << "..." << std::flush;
+        
+        // Report compressing stage for this volume (scale to 25%-75% range)
+        if (callback) {
+            float volumeProgress = (float)vol_idx / volumes.size();
+            BlockProgressInfo info;
+            info.totalBlocks = static_cast<int>(volumes.size());
+            info.completedBlocks = static_cast<int>(vol_idx);
+            info.currentBlock = static_cast<int>(vol_idx);
+            info.currentBlockSize = volumes[vol_idx].size();
+            info.overallProgress = 0.25f + (volumeProgress * 0.5f);  // 25% to 75%
+            info.currentBlockProgress = 0.0f;
+            info.throughputMBps = 0.0;
+            info.stage = "compressing";
+            callback(info);
+        }
         
         size_t inputSize = volumes[vol_idx].size();
         std::vector<uint8_t>& inputData = volumes[vol_idx];
@@ -484,6 +578,22 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
         uncompressedOffset += inputSize;
         totalCompressedSize += outputData.size();
         
+        // Report progress after this volume completes (scale to 25%-75% range)
+        if (callback) {
+            float volumeProgress = (float)(vol_idx + 1) / volumes.size();  // Completed volumes
+            BlockProgressInfo info;
+            info.totalBlocks = static_cast<int>(volumes.size());
+            info.completedBlocks = static_cast<int>(vol_idx + 1);
+            info.currentBlock = static_cast<int>(vol_idx);
+            info.currentBlockSize = volumes[vol_idx].size();
+            info.overallProgress = 0.25f + (volumeProgress * 0.5f);  // 25% to 75%
+            info.currentBlockProgress = 1.0f;
+            double throughputMBps = (inputSize / (1024.0 * 1024.0)) / duration;
+            info.throughputMBps = throughputMBps;
+            info.stage = "compressing";
+            callback(info);
+        }
+        
         // Cleanup GPU memory for this volume
         cudaFree(d_input_data);
         cudaFree(d_input_ptrs);
@@ -498,6 +608,20 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     
     // Destroy CUDA stream
     cudaStreamDestroy(stream);
+    
+    // Report writing stage starting (75%)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(volumes.size());
+        info.completedBlocks = static_cast<int>(volumes.size());
+        info.currentBlock = static_cast<int>(volumes.size() - 1);
+        info.currentBlockSize = 0;
+        info.overallProgress = 0.75f;  // Writing starts at 75%
+        info.currentBlockProgress = 1.0f;
+        info.throughputMBps = 0.0;
+        info.stage = "writing";
+        callback(info);
+    }
     
     // Write volume files
     // First volume gets manifest + metadata + compressed data
@@ -517,7 +641,7 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     firstVolumeOutput.insert(firstVolumeOutput.end(), 
                             volumeCompressedData[0].begin(), volumeCompressedData[0].end());
     
-    writeFile(firstVolumeFile, firstVolumeOutput.data(), firstVolumeOutput.size());
+    writeFile(firstVolumeFile, firstVolumeOutput.data(), firstVolumeOutput.size(), callback);
     
     // Update first volume metadata with actual size (including manifest and metadata)
     volumeMetadata[0].compressedSize = firstVolumeOutput.size();
@@ -526,7 +650,21 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
     // Write remaining volumes (just compressed data)
     for (size_t i = 1; i < volumes.size(); i++) {
         std::string volumeFile = generateVolumeFilename(outputFile, i + 1);
-        writeFile(volumeFile, volumeCompressedData[i].data(), volumeCompressedData[i].size());
+        writeFile(volumeFile, volumeCompressedData[i].data(), volumeCompressedData[i].size(), callback);
+    }
+    
+    // Report completion (100%)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = static_cast<int>(volumes.size());
+        info.completedBlocks = static_cast<int>(volumes.size());
+        info.currentBlock = static_cast<int>(volumes.size() - 1);
+        info.currentBlockSize = 0;
+        info.overallProgress = 1.0f;  // 100% complete
+        info.currentBlockProgress = 1.0f;
+        info.throughputMBps = 0.0;
+        info.stage = "complete";
+        callback(info);
     }
     
     // Print summary
@@ -541,34 +679,34 @@ static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_
 }
 
 // Public wrapper for single file/folder compression
-void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     // Create archive (handles both files and directories)
     std::vector<uint8_t> archiveData;
     if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
+        archiveData = createArchiveFromFolder(inputPath, callback);
     } else {
-        archiveData = createArchiveFromFile(inputPath);
+        archiveData = createArchiveFromFile(inputPath, callback);
     }
     
     // Call internal function with archive data
-    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
+    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize, callback);
 }
 
-void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
     
     // Create archive from file list (in memory)
-    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths, callback);
     
     // Compress directly from buffer - no temporary file needed!
-    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
+    compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize, callback);
 }
 
 // ============================================================================
 // GPU Batched Decompression
 // ============================================================================
 
-void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {
+void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputPath, ProgressCallback callback) {
     // Detect volume files
     auto volumeFiles = detectVolumeFiles(inputFile);
     
@@ -616,7 +754,7 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
                       << " GB volumes (need ~" << (manifest.volumeSize * 2.1 / (1024.0 * 1024.0 * 1024.0)) 
                       << " GB VRAM)." << std::endl;
             std::cout << "Falling back to CPU decompression..." << std::endl;
-            decompressCPU(algo, inputFile, outputPath);
+            decompressCPU(algo, inputFile, outputPath, callback);
             return;
         }
         
@@ -900,24 +1038,24 @@ static void compressGPUManagerFromBuffer(AlgoType algo, const std::vector<uint8_
 }
 
 // Public wrapper for single file/folder compression
-void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressGPUManager(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     // Create archive (handles both files and directories)
     std::vector<uint8_t> archiveData;
     if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
+        archiveData = createArchiveFromFolder(inputPath, callback);
     } else {
-        archiveData = createArchiveFromFile(inputPath);
+        archiveData = createArchiveFromFile(inputPath, callback);
     }
     
     // Call internal function with archive data
     compressGPUManagerFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
-void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
     
     // Create archive from file list (in memory)
-    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths, callback);
     
     // Compress directly from buffer - no temporary file needed!
     compressGPUManagerFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
@@ -927,7 +1065,7 @@ void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& f
 // GPU Manager API Decompression
 // ============================================================================
 
-void decompressGPUManager(const std::string& inputFile, const std::string& outputPath) {
+void decompressGPUManager(const std::string& inputFile, const std::string& outputPath, ProgressCallback callback) {
     // Detect volume files
     auto volumeFiles = detectVolumeFiles(inputFile);
     

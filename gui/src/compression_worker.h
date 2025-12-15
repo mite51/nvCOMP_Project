@@ -89,6 +89,12 @@ public:
      * @return true if cancellation was requested
      */
     bool isCanceled() const;
+    
+    /**
+     * @brief Gets elapsed time since operation started
+     * @return Elapsed time in milliseconds
+     */
+    qint64 getElapsedTime() const;
 
 signals:
     /**
@@ -106,6 +112,38 @@ signals:
      * @param etaSeconds Estimated time remaining in seconds
      */
     void progressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds);
+
+    /**
+     * @brief Emitted when total block count is known
+     * @param total Total number of blocks
+     */
+    void totalBlocksChanged(int total);
+
+    /**
+     * @brief Emitted when a block's progress changes
+     * @param block Block index
+     * @param progress Block progress (0.0 to 1.0)
+     */
+    void blockProgressChanged(int block, float progress);
+
+    /**
+     * @brief Emitted when a block completes
+     * @param block Block index
+     * @param ratio Compression ratio for this block
+     */
+    void blockCompleted(int block, float ratio);
+
+    /**
+     * @brief Emitted when throughput changes
+     * @param mbps Throughput in MB/s
+     */
+    void throughputChanged(double mbps);
+
+    /**
+     * @brief Emitted when processing stage changes
+     * @param stage Stage name
+     */
+    void stageChanged(QString stage);
 
     /**
      * @brief Emitted when operation completes successfully
@@ -155,6 +193,7 @@ private:
     uint64_t m_totalBytes;
     uint64_t m_processedBytes;
     std::chrono::steady_clock::time_point m_startTime;
+    qint64 m_finalElapsedMs;  // Store final elapsed time when operation completes
     mutable QMutex m_mutex;
 
     // nvCOMP operation handle
@@ -177,6 +216,16 @@ private:
      * @param user_data Pointer to CompressionWorker instance
      */
     static void progressCallback(uint64_t current, uint64_t total, void* user_data);
+
+    /**
+     * @brief Block-level progress callback for nvCOMP C API
+     * @param handle Operation handle
+     * @param info Progress information
+     * @param user_data Pointer to CompressionWorker instance
+     */
+    static void blockProgressCallback(nvcomp_operation_handle handle,
+                                     const nvcomp_progress_info_t* info,
+                                     void* user_data);
 
     /**
      * @brief Updates progress information

@@ -19,6 +19,8 @@ QT_END_NAMESPACE
 class CompressionWorker;
 class QListWidgetItem;
 class SettingsDialog;
+class GPUMonitorWidget;
+class ProgressWidget;
 
 /**
  * @class MainWindow
@@ -111,6 +113,9 @@ private:
     bool m_gpuAvailable;  ///< GPU availability status
     CompressionWorker *m_worker;  ///< Background compression worker thread
     SettingsDialog *m_settingsDialog;  ///< Settings dialog (created on demand)
+    GPUMonitorWidget *m_gpuMonitor;  ///< GPU monitor widget (created on demand)
+    ProgressWidget *m_progressWidget;  ///< Advanced progress widget (embedded or hidden)
+    QString m_currentStage;  ///< Current processing stage (reading, compressing, writing)
     
     /**
      * @brief Initializes UI components and connections
@@ -274,6 +279,51 @@ private slots:
      * @param item The item that was double-clicked
      */
     void onFileListDoubleClicked(QListWidgetItem* item);
+    
+    /**
+     * @brief Handles GPU Monitor menu action
+     * Opens GPU monitoring window
+     */
+    void onGPUMonitorTriggered();
+    
+    /**
+     * @brief Handles block progress updates from worker
+     * @param total Total blocks
+     */
+    void onTotalBlocksChanged(int total);
+    
+    /**
+     * @brief Handles block progress changes
+     * @param block Block index
+     * @param progress Block progress (0.0 to 1.0)
+     */
+    void onBlockProgressChanged(int block, float progress);
+    
+    /**
+     * @brief Handles block completion
+     * @param block Block index
+     * @param ratio Compression ratio
+     */
+    void onBlockCompleted(int block, float ratio);
+    
+    /**
+     * @brief Handles throughput updates
+     * @param mbps Throughput in MB/s
+     */
+    void onThroughputChanged(double mbps);
+    
+    /**
+     * @brief Handles stage changes
+     * @param stage Stage name
+     */
+    void onStageChanged(const QString &stage);
+    
+    /**
+     * @brief Handles VRAM low warning from GPU monitor
+     * @param deviceIndex GPU device index
+     * @param percentFree Percent free VRAM
+     */
+    void onVRAMLowWarning(int deviceIndex, float percentFree);
 };
 
 #endif // MAINWINDOW_H

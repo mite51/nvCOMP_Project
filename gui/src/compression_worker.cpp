@@ -17,6 +17,7 @@ CompressionWorker::CompressionWorker(QObject *parent)
     , m_canceled(0)
     , m_totalBytes(0)
     , m_processedBytes(0)
+    , m_finalElapsedMs(0)
     , m_operationHandle(nullptr)
 {
 }
@@ -87,6 +88,16 @@ bool CompressionWorker::isCanceled() const
     return m_canceled.loadAcquire() != 0;
 }
 
+qint64 CompressionWorker::getElapsedTime() const
+{
+    if (isRunning()) {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime).count();
+    }
+    // Return final elapsed time if operation has completed
+    return m_finalElapsedMs;
+}
+
 void CompressionWorker::run()
 {
     m_startTime = std::chrono::steady_clock::now();
@@ -95,6 +106,7 @@ void CompressionWorker::run()
     m_operationHandle = nvcomp_create_operation_handle();
     if (m_operationHandle) {
         nvcomp_set_progress_callback(m_operationHandle, progressCallback, this);
+        nvcomp_set_block_progress_callback(m_operationHandle, blockProgressCallback, this);
     }
 
     try {
@@ -166,14 +178,8 @@ void CompressionWorker::performCompress()
         emit statusMessage(QString("Compressing %1 files...").arg(m_inputFiles.size()));
     }
     
-    // Show initial progress
-    emit progressChanged(10, QString("Preparing..."));
-    QThread::msleep(100);  // Brief delay so user sees the UI update
-
+    // Progress will be reported by block progress callbacks from the core library
     nvcomp_error_t result;
-    
-    // Show progress before compression starts
-    emit progressChanged(25, QString("Compressing..."));
     
     // Convert QString to std::string ONCE and keep them in scope
     std::string inputPathStr;
@@ -259,9 +265,7 @@ void CompressionWorker::performCompress()
         }
     }
 
-    // Show progress after compression (core functions are synchronous/blocking)
-    emit progressChanged(90, QString("Finalizing..."));
-    
+    // Check result (progress is reported by block progress callbacks)
     if (result != NVCOMP_SUCCESS) {
         const char* errorMsg = nvcomp_get_last_error();
         emit error(QString("Compression failed: %1").arg(errorMsg ? errorMsg : "Unknown error"));
@@ -282,6 +286,9 @@ void CompressionWorker::performCompress()
 
     auto endTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - m_startTime);
+    
+    // Store final elapsed time
+    m_finalElapsedMs = duration.count();
 
     emit progressChanged(100, "Complete");
     emit finished(outputFile, compressionRatio, duration.count());
@@ -374,6 +381,9 @@ void CompressionWorker::performDecompress()
 
     auto endTime = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - m_startTime);
+    
+    // Store final elapsed time
+    m_finalElapsedMs = duration.count();
 
     emit progressChanged(100, "Complete");
     emit finished(outputPath, 0.0, duration.count());
@@ -384,6 +394,71 @@ void CompressionWorker::progressCallback(uint64_t current, uint64_t total, void*
     if (user_data) {
         CompressionWorker* worker = static_cast<CompressionWorker*>(user_data);
         worker->updateProgress(current, total);
+    }
+}
+
+void CompressionWorker::blockProgressCallback(nvcomp_operation_handle handle,
+                                              const nvcomp_progress_info_t* info,
+                                              void* user_data)
+{
+    if (!user_data || !info) {
+        return;
+    }
+    
+    CompressionWorker* worker = static_cast<CompressionWorker*>(user_data);
+    
+    if (worker->isCanceled()) {
+        return;
+    }
+    
+    // Emit block-level signals
+    static int lastTotalBlocks = -1;
+    if (info->totalBlocks != lastTotalBlocks) {
+        lastTotalBlocks = info->totalBlocks;
+        emit worker->totalBlocksChanged(info->totalBlocks);
+    }
+    
+    // Emit current block progress
+    if (info->currentBlock >= 0 && info->currentBlockProgress > 0.0f) {
+        emit worker->blockProgressChanged(info->currentBlock, info->currentBlockProgress);
+    }
+    
+    // Emit completed blocks (when a block reaches 100%)
+    static int lastCompletedBlocks = -1;
+    if (info->completedBlocks > lastCompletedBlocks) {
+        // A new block was completed
+        int newlyCompleted = info->completedBlocks - std::max(0, lastCompletedBlocks);
+        for (int i = 0; i < newlyCompleted; ++i) {
+            int blockIndex = lastCompletedBlocks + i + 1;
+            if (blockIndex < info->totalBlocks) {
+                // Use a default compression ratio estimate (will be improved in future)
+                emit worker->blockCompleted(blockIndex, 0.5f);
+            }
+        }
+        lastCompletedBlocks = info->completedBlocks;
+    }
+    
+    // Emit throughput
+    if (info->throughputMBps > 0.0) {
+        emit worker->throughputChanged(info->throughputMBps);
+    }
+    
+    // Emit stage changes
+    if (info->stage) {
+        QString stage = QString::fromUtf8(info->stage);
+        static QString lastStage;
+        if (stage != lastStage) {
+            lastStage = stage;
+            emit worker->stageChanged(stage);
+        }
+    }
+    
+    // Also emit overall progress
+    if (info->overallProgress >= 0.0f) {
+        worker->updateProgress(
+            static_cast<uint64_t>(info->overallProgress * worker->m_totalBytes),
+            worker->m_totalBytes
+        );
     }
 }
 

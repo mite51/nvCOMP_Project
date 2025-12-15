@@ -31,11 +31,47 @@ std::vector<uint8_t> readFile(const std::string& filename) {
 }
 
 void writeFile(const std::string& filename, const void* data, size_t size) {
+    writeFile(filename, data, size, nullptr);
+}
+
+void writeFile(const std::string& filename, const void* data, size_t size, ProgressCallback callback) {
     std::ofstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("Failed to open output file: " + filename);
     }
-    file.write(reinterpret_cast<const char*>(data), size);
+    
+    // If no callback or small file, write all at once
+    if (!callback || size < 1024 * 1024) {  // Less than 1MB
+        file.write(reinterpret_cast<const char*>(data), size);
+        return;
+    }
+    
+    // Write in chunks and report progress
+    const size_t WRITE_CHUNK_SIZE = 64 * 1024 * 1024;  // 64MB chunks for writing
+    const uint8_t* dataPtr = reinterpret_cast<const uint8_t*>(data);
+    size_t remaining = size;
+    size_t written = 0;
+    
+    while (remaining > 0) {
+        size_t chunkSize = std::min(WRITE_CHUNK_SIZE, remaining);
+        file.write(reinterpret_cast<const char*>(dataPtr + written), chunkSize);
+        
+        written += chunkSize;
+        remaining -= chunkSize;
+        
+        // Report progress (map to 75%-100% range)
+        float writeProgress = static_cast<float>(written) / size;
+        BlockProgressInfo info;
+        info.totalBlocks = 1;
+        info.completedBlocks = (remaining == 0) ? 1 : 0;
+        info.currentBlock = 0;
+        info.currentBlockSize = size;
+        info.overallProgress = 0.75f + (writeProgress * 0.25f);  // 75% to 100%
+        info.currentBlockProgress = writeProgress;
+        info.throughputMBps = 0.0;
+        info.stage = "writing";
+        callback(info);
+    }
 }
 
 std::string normalizePath(const std::string& path) {
@@ -94,7 +130,7 @@ static std::vector<fs::path> collectFiles(const fs::path& dirPath) {
 // Archive Creation
 // ============================================================================
 
-std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath) {
+std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, ProgressCallback callback) {
     std::vector<uint8_t> archiveData;
     fs::path basePath(folderPath);
     
@@ -110,6 +146,12 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath) {
         throw std::runtime_error("No files to archive");
     }
     
+    // Calculate total size for progress reporting
+    uint64_t totalSize = 0;
+    for (const auto& filePath : files) {
+        totalSize += fs::file_size(filePath);
+    }
+    
     // Write header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
@@ -121,7 +163,9 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath) {
     archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
     
     // Write each file
-    for (const auto& filePath : files) {
+    uint64_t processedSize = 0;
+    for (size_t i = 0; i < files.size(); i++) {
+        const auto& filePath = files[i];
         std::string relativePath = getRelativePath(filePath.string(), basePath.string());
         if (relativePath.empty() || relativePath == ".") {
             relativePath = filePath.filename().string();
@@ -145,13 +189,29 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath) {
         // Write file data
         archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
         
+        processedSize += fileData.size();
         std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+        
+        // Report progress (0-25% range for reading)
+        if (callback && totalSize > 0) {
+            float readProgress = static_cast<float>(processedSize) / totalSize;
+            BlockProgressInfo info;
+            info.totalBlocks = static_cast<int>(files.size());
+            info.completedBlocks = static_cast<int>(i + 1);
+            info.currentBlock = static_cast<int>(i);
+            info.currentBlockSize = fileData.size();
+            info.overallProgress = readProgress * 0.25f;  // Scale to 0-25%
+            info.currentBlockProgress = 1.0f;
+            info.throughputMBps = 0.0;
+            info.stage = "reading";
+            callback(info);
+        }
     }
     
     return archiveData;
 }
 
-std::vector<uint8_t> createArchiveFromFile(const std::string& filePath) {
+std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, ProgressCallback callback) {
     std::vector<uint8_t> archiveData;
     
     fs::path p(filePath);
@@ -191,10 +251,24 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath) {
     
     std::cout << "  Added: " << filename << " (" << fileData.size() << " bytes)" << std::endl;
     
+    // Report progress (0-25% range for reading)
+    if (callback) {
+        BlockProgressInfo info;
+        info.totalBlocks = 1;
+        info.completedBlocks = 1;
+        info.currentBlock = 0;
+        info.currentBlockSize = fileData.size();
+        info.overallProgress = 0.25f;  // Complete reading phase
+        info.currentBlockProgress = 1.0f;
+        info.throughputMBps = 0.0;
+        info.stage = "reading";
+        callback(info);
+    }
+    
     return archiveData;
 }
 
-std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths) {
+std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths, ProgressCallback callback) {
     std::vector<uint8_t> archiveData;
     
     if (filePaths.empty()) {
@@ -237,6 +311,12 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
     
     std::cout << "Total files to archive: " << allFiles.size() << std::endl;
     
+    // Calculate total size for progress reporting
+    uint64_t totalSize = 0;
+    for (const auto& fileWithBase : allFiles) {
+        totalSize += fs::file_size(fileWithBase.filePath);
+    }
+    
     // Write header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
@@ -248,7 +328,9 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
     archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
     
     // Write each file
-    for (const auto& fileWithBase : allFiles) {
+    uint64_t processedSize = 0;
+    for (size_t i = 0; i < allFiles.size(); i++) {
+        const auto& fileWithBase = allFiles[i];
         std::string relativePath = getRelativePath(fileWithBase.filePath.string(), fileWithBase.basePath.string());
         if (relativePath.empty() || relativePath == ".") {
             relativePath = fileWithBase.filePath.filename().string();
@@ -272,7 +354,23 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         // Write file data
         archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
         
+        processedSize += fileData.size();
         std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+        
+        // Report progress (0-25% range for reading)
+        if (callback && totalSize > 0) {
+            float readProgress = static_cast<float>(processedSize) / totalSize;
+            BlockProgressInfo info;
+            info.totalBlocks = static_cast<int>(allFiles.size());
+            info.completedBlocks = static_cast<int>(i + 1);
+            info.currentBlock = static_cast<int>(i);
+            info.currentBlockSize = fileData.size();
+            info.overallProgress = readProgress * 0.25f;  // Scale to 0-25%
+            info.currentBlockProgress = 1.0f;
+            info.throughputMBps = 0.0;
+            info.stage = "reading";
+            callback(info);
+        }
     }
     
     return archiveData;

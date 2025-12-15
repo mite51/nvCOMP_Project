@@ -71,12 +71,38 @@ typedef struct nvcomp_operation_t* nvcomp_operation_handle;
 // ============================================================================
 
 /**
- * @brief Progress callback function type
+ * @brief Block-level progress information
+ */
+typedef struct {
+    int totalBlocks;              ///< Total number of blocks
+    int completedBlocks;          ///< Number of completed blocks
+    int currentBlock;             ///< Index of current block being processed
+    size_t currentBlockSize;      ///< Size of current block in bytes
+    float overallProgress;        ///< Overall progress (0.0 to 1.0)
+    float currentBlockProgress;   ///< Current block progress (0.0 to 1.0)
+    double throughputMBps;        ///< Current throughput in MB/s
+    const char* stage;            ///< Current stage (e.g., "preparing", "compressing", "writing")
+} nvcomp_progress_info_t;
+
+/**
+ * @brief Progress callback function type (simple)
  * @param current Current progress value
  * @param total Total progress value
  * @param user_data User-provided context data
  */
 typedef void (*nvcomp_progress_callback_t)(uint64_t current, uint64_t total, void* user_data);
+
+/**
+ * @brief Block-level progress callback function type
+ * @param handle Operation handle
+ * @param info Detailed progress information
+ * @param user_data User-provided context data
+ */
+typedef void (*nvcomp_block_progress_callback_t)(
+    nvcomp_operation_handle handle,
+    const nvcomp_progress_info_t* info,
+    void* user_data
+);
 
 // ============================================================================
 // Error Handling Functions
@@ -193,6 +219,19 @@ NVCOMP_C_API void nvcomp_destroy_operation_handle(nvcomp_operation_handle handle
 NVCOMP_C_API nvcomp_error_t nvcomp_set_progress_callback(
     nvcomp_operation_handle handle,
     nvcomp_progress_callback_t callback,
+    void* user_data
+);
+
+/**
+ * @brief Set block-level progress callback for an operation
+ * @param handle Operation handle
+ * @param callback Block progress callback function
+ * @param user_data User data to pass to callback
+ * @return Error code
+ */
+NVCOMP_C_API nvcomp_error_t nvcomp_set_block_progress_callback(
+    nvcomp_operation_handle handle,
+    nvcomp_block_progress_callback_t callback,
     void* user_data
 );
 

@@ -8,6 +8,8 @@
 #include "compression_worker.h"
 #include "archive_viewer.h"
 #include "settings_dialog.h"
+#include "gpu_monitor.h"
+#include "progress_widget.h"
 #include <QMessageBox>
 #include <QApplication>
 #include <QPalette>
@@ -26,6 +28,7 @@
 #include <QAbstractItemView>
 #include <QEvent>
 #include <QListWidgetItem>
+#include <QDebug>
 
 // Helper class to keep the file dialog button always enabled
 class ButtonEnabledFilter : public QObject
@@ -56,6 +59,9 @@ MainWindow::MainWindow(QWidget *parent)
     , m_gpuAvailable(false)
     , m_worker(nullptr)
     , m_settingsDialog(nullptr)
+    , m_gpuMonitor(nullptr)
+    , m_progressWidget(nullptr)
+    , m_currentStage("")
 {
     ui->setupUi(this);
     setupUi();
@@ -86,6 +92,18 @@ MainWindow::~MainWindow()
     if (m_settingsDialog) {
         delete m_settingsDialog;
         m_settingsDialog = nullptr;
+    }
+    
+    // Clean up GPU monitor if it exists
+    if (m_gpuMonitor) {
+        delete m_gpuMonitor;
+        m_gpuMonitor = nullptr;
+    }
+    
+    // Clean up progress widget if it exists
+    if (m_progressWidget) {
+        delete m_progressWidget;
+        m_progressWidget = nullptr;
     }
     
     delete ui;
@@ -141,6 +159,27 @@ void MainWindow::setupConnections()
     if (ui->actionSettings) {
         connect(ui->actionSettings, &QAction::triggered,
                 this, &MainWindow::onSettingsClicked);
+    }
+    
+    // Check if GPU Monitor action exists (may need to be added to UI file)
+    if (ui->menuTools) {
+        // Try to find existing GPU Monitor action
+        QAction *gpuMonitorAction = nullptr;
+        for (QAction *action : ui->menuTools->actions()) {
+            if (action->text().contains("GPU Monitor", Qt::CaseInsensitive)) {
+                gpuMonitorAction = action;
+                break;
+            }
+        }
+        
+        // If not found, create it
+        if (!gpuMonitorAction) {
+            gpuMonitorAction = new QAction("GPU Monitor", this);
+            ui->menuTools->addAction(gpuMonitorAction);
+        }
+        
+        connect(gpuMonitorAction, &QAction::triggered,
+                this, &MainWindow::onGPUMonitorTriggered);
     }
     
     // Connect file list double-click
@@ -526,10 +565,23 @@ void MainWindow::onCompressClicked()
                 this, &MainWindow::onWorkerCanceled);
         connect(m_worker, &CompressionWorker::statusMessage,
                 this, &MainWindow::onWorkerStatusMessage);
+        
+        // Connect block-level progress signals
+        connect(m_worker, &CompressionWorker::totalBlocksChanged,
+                this, &MainWindow::onTotalBlocksChanged);
+        connect(m_worker, &CompressionWorker::blockProgressChanged,
+                this, &MainWindow::onBlockProgressChanged);
+        connect(m_worker, &CompressionWorker::blockCompleted,
+                this, &MainWindow::onBlockCompleted);
+        connect(m_worker, &CompressionWorker::throughputChanged,
+                this, &MainWindow::onThroughputChanged);
+        connect(m_worker, &CompressionWorker::stageChanged,
+                this, &MainWindow::onStageChanged);
     }
     
     // Setup and start compression
     m_worker->setupCompress(m_fileList, outputPath, algorithm, useCpuMode, volumeSize);
+    
     m_worker->start();
     
     // Update UI state - Change Compress button to Cancel
@@ -589,6 +641,18 @@ void MainWindow::onDecompressClicked()
                 this, &MainWindow::onWorkerCanceled);
         connect(m_worker, &CompressionWorker::statusMessage,
                 this, &MainWindow::onWorkerStatusMessage);
+        
+        // Connect block-level progress signals
+        connect(m_worker, &CompressionWorker::totalBlocksChanged,
+                this, &MainWindow::onTotalBlocksChanged);
+        connect(m_worker, &CompressionWorker::blockProgressChanged,
+                this, &MainWindow::onBlockProgressChanged);
+        connect(m_worker, &CompressionWorker::blockCompleted,
+                this, &MainWindow::onBlockCompleted);
+        connect(m_worker, &CompressionWorker::throughputChanged,
+                this, &MainWindow::onThroughputChanged);
+        connect(m_worker, &CompressionWorker::stageChanged,
+                this, &MainWindow::onStageChanged);
     }
     
     // Setup and start decompression
@@ -658,10 +722,25 @@ void MainWindow::onWorkerProgress(int percentage, const QString &currentFile)
 {
     ui->progressBar->setValue(percentage);
     
+    // Format: "Progress: XX% (elapsed time)"
+    auto formatElapsed = [](qint64 ms) -> QString {
+        int seconds = ms / 1000;
+        if (seconds < 60) return QString("%1s").arg(seconds);
+        int mins = seconds / 60;
+        int secs = seconds % 60;
+        if (mins < 60) return QString("%1m %2s").arg(mins).arg(secs);
+        int hours = mins / 60;
+        mins = mins % 60;
+        return QString("%1h %2m").arg(hours).arg(mins);
+    };
+    
+    qint64 elapsed = m_worker ? m_worker->getElapsedTime() : 0;
+    QString elapsedStr = formatElapsed(elapsed);
+    
     if (!currentFile.isEmpty()) {
-        statusBar()->showMessage(QString("Processing: %1 (%2%)").arg(currentFile).arg(percentage));
+        ui->progressBar->setFormat(QString("%p% - %1").arg(elapsedStr));
     } else {
-        statusBar()->showMessage(QString("Progress: %1%").arg(percentage));
+        ui->progressBar->setFormat(QString("%p% - %1").arg(elapsedStr));
     }
 }
 
@@ -682,17 +761,33 @@ void MainWindow::onWorkerProgressDetails(uint64_t current, uint64_t total, doubl
         return QString("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
     };
     
-    QString detailsText = QString("%1 / %2 @ %3 MB/s (ETA: %4)")
+    // Include stage in the details if available
+    QString stagePrefix = m_currentStage.isEmpty() ? "" : QString("[%1] ").arg(m_currentStage.toUpper());
+    QString detailsText = QString("%5%1 / %2 @ %3 MB/s (ETA: %4)")
                              .arg(formatSize(current))
                              .arg(formatSize(total))
                              .arg(speedMBps, 0, 'f', 2)
-                             .arg(formatTime(etaSeconds));
+                             .arg(formatTime(etaSeconds))
+                             .arg(stagePrefix);
     
     ui->labelStatus->setText(detailsText);
+    
+    // Update progress widget if it exists
+    if (m_progressWidget) {
+        m_progressWidget->setDataProgress(current, total);
+        m_progressWidget->updateThroughput(speedMBps);
+        m_progressWidget->setETA(etaSeconds);
+    }
 }
 
 void MainWindow::onWorkerFinished(const QString &outputPath, double compressionRatio, qint64 durationMs)
 {
+    // Clear current stage
+    m_currentStage.clear();
+    
+    // Keep progress widget open so user can see final result
+    // They can close it manually
+    
     // Re-enable buttons and restore Compress button text
     ui->buttonCompress->setText("🗜️ Compress");
     ui->buttonCompress->setToolTip("Compress selected files");
@@ -703,6 +798,10 @@ void MainWindow::onWorkerFinished(const QString &outputPath, double compressionR
     
     // Update progress bar to 100%
     ui->progressBar->setValue(100);
+    
+    if (m_progressWidget) {
+        m_progressWidget->updateOverallProgress(1.0f);
+    }
     
     // Format duration
     double durationSec = durationMs / 1000.0;
@@ -743,6 +842,9 @@ void MainWindow::onWorkerFinished(const QString &outputPath, double compressionR
 
 void MainWindow::onWorkerError(const QString &errorMessage)
 {
+    // Clear current stage
+    m_currentStage.clear();
+    
     // Re-enable buttons and restore Compress button text
     ui->buttonCompress->setText("🗜️ Compress");
     ui->buttonCompress->setToolTip("Compress selected files");
@@ -929,6 +1031,116 @@ void MainWindow::applyTheme(const QString &theme)
     } else {
         // "System" - use default system palette
         qApp->setPalette(qApp->style()->standardPalette());
+    }
+}
+
+void MainWindow::onGPUMonitorTriggered()
+{
+    // Create GPU monitor on demand
+    if (!m_gpuMonitor) {
+        m_gpuMonitor = new GPUMonitorWidget(nullptr);  // Top-level window
+        m_gpuMonitor->setWindowTitle("GPU Monitor - nvCOMP");
+        m_gpuMonitor->setAttribute(Qt::WA_DeleteOnClose, false);
+        
+        // Connect VRAM warning signal
+        connect(m_gpuMonitor, &GPUMonitorWidget::vramLowWarning,
+                this, &MainWindow::onVRAMLowWarning);
+    }
+    
+    // Show the GPU monitor window
+    m_gpuMonitor->show();
+    m_gpuMonitor->raise();
+    m_gpuMonitor->activateWindow();
+}
+
+void MainWindow::onTotalBlocksChanged(int total)
+{
+    // DISABLED - Block Progress Widget (Work in Progress)
+    // TODO: Re-enable once block progress visualization is stable
+    /*
+    // Create progress widget dialog on demand
+    if (!m_progressWidget) {
+        m_progressWidget = new ProgressWidget(nullptr);  // Top-level window
+        m_progressWidget->setWindowTitle("*** WORK IN PROGRESS *** Block Progress - nvCOMP");
+        m_progressWidget->setWindowFlags(Qt::Dialog);
+        m_progressWidget->resize(800, 600);
+    }
+    
+    m_progressWidget->setTotalBlocks(total);
+    m_progressWidget->show();
+    m_progressWidget->raise();
+    */
+    
+    // Debug output
+    qDebug() << "Total blocks set:" << total;
+}
+
+void MainWindow::onBlockProgressChanged(int block, float progress)
+{
+    // DISABLED - Block Progress Widget (Work in Progress)
+    /*
+    if (m_progressWidget) {
+        m_progressWidget->updateBlockProgress(block, progress);
+    }
+    */
+    qDebug() << "Block" << block << "progress:" << (progress * 100) << "%";
+}
+
+void MainWindow::onBlockCompleted(int block, float ratio)
+{
+    // DISABLED - Block Progress Widget (Work in Progress)
+    /*
+    if (m_progressWidget) {
+        m_progressWidget->setBlockComplete(block, ratio);
+    }
+    */
+    qDebug() << "Block" << block << "completed with ratio:" << ratio;
+}
+
+void MainWindow::onThroughputChanged(double mbps)
+{
+    // DISABLED - Block Progress Widget (Work in Progress)
+    /*
+    if (m_progressWidget) {
+        m_progressWidget->updateThroughput(mbps);
+    }
+    */
+    
+    // Update status bar with throughput
+    statusBar()->showMessage(QString("Speed: %1 MB/s").arg(mbps, 0, 'f', 2));
+}
+
+void MainWindow::onStageChanged(const QString &stage)
+{
+    // Store the current stage
+    m_currentStage = stage;
+    
+    // DISABLED - Block Progress Widget (Work in Progress)
+    /*
+    if (m_progressWidget) {
+        m_progressWidget->setCurrentStage(stage);
+    }
+    */
+}
+
+void MainWindow::onVRAMLowWarning(int deviceIndex, float percentFree)
+{
+    // Show warning in status bar
+    statusBar()->showMessage(
+        QString("⚠️ Warning: GPU %1 has low VRAM (%2% free)")
+            .arg(deviceIndex)
+            .arg(percentFree, 0, 'f', 1),
+        10000  // Show for 10 seconds
+    );
+    
+    // Optionally show a message box for critical warnings
+    if (percentFree < 5.0f) {
+        QMessageBox::warning(this, tr("Low VRAM Warning"),
+            tr("GPU %1 is critically low on VRAM (%2% free).\n\n"
+               "Compression performance may be degraded or fail.\n"
+               "Consider using CPU mode or reducing file size.")
+                .arg(deviceIndex)
+                .arg(percentFree, 0, 'f', 1));
     }
 }
 

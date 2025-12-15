@@ -27,14 +27,25 @@ thread_local std::string g_last_error;
 struct nvcomp_operation_t {
     nvcomp_progress_callback_t callback;
     void* user_data;
+    nvcomp_block_progress_callback_t block_callback;
+    void* block_user_data;
     std::mutex mutex;
     
-    nvcomp_operation_t() : callback(nullptr), user_data(nullptr) {}
+    nvcomp_operation_t() 
+        : callback(nullptr), user_data(nullptr),
+          block_callback(nullptr), block_user_data(nullptr) {}
     
     void reportProgress(uint64_t current, uint64_t total) {
         std::lock_guard<std::mutex> lock(mutex);
         if (callback) {
             callback(current, total, user_data);
+        }
+    }
+    
+    void reportBlockProgress(const nvcomp_progress_info_t* info) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (block_callback) {
+            block_callback(this, info, block_user_data);
         }
     }
 };
@@ -275,6 +286,27 @@ nvcomp_error_t nvcomp_set_progress_callback(
     }
 }
 
+nvcomp_error_t nvcomp_set_block_progress_callback(
+    nvcomp_operation_handle handle,
+    nvcomp_block_progress_callback_t callback,
+    void* user_data
+) {
+    if (!handle) {
+        g_last_error = "Null operation handle";
+        return NVCOMP_ERROR_INVALID_ARGUMENT;
+    }
+    
+    try {
+        std::lock_guard<std::mutex> lock(handle->mutex);
+        handle->block_callback = callback;
+        handle->block_user_data = user_data;
+        return NVCOMP_SUCCESS;
+    } catch (...) {
+        g_last_error = "Failed to set block progress callback";
+        return NVCOMP_ERROR_UNKNOWN;
+    }
+}
+
 // ============================================================================
 // Compression Functions
 // ============================================================================
@@ -292,11 +324,32 @@ nvcomp_error_t nvcomp_compress_gpu_batched(
     }
     
     auto result = executeSafely([&]() {
+        // Create C++ callback that calls the C API handle callback
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                // Convert C++ info to C info
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                
+                // Call the C callback
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressGPUBatched(
             toCorealgo(algo),
             input_path,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -325,11 +378,29 @@ nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
             }
         }
         
+        // Create C++ callback that calls the C API handle callback
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressGPUBatchedFileList(
             toCorealgo(algo),
             paths,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -352,10 +423,27 @@ nvcomp_error_t nvcomp_decompress_gpu_batched(
     }
     
     auto result = executeSafely([&]() {
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::decompressGPUBatched(
             toCorealgo(algo),
             input_file,
-            output_path
+            output_path,
+            cppCallback
         );
     });
     
@@ -379,11 +467,28 @@ nvcomp_error_t nvcomp_compress_gpu_manager(
     }
     
     auto result = executeSafely([&]() {
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressGPUManager(
             toCorealgo(algo),
             input_path,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -416,11 +521,28 @@ nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
             }
         }
         
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressGPUManagerFileList(
             toCorealgo(algo),
             paths,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -442,9 +564,26 @@ nvcomp_error_t nvcomp_decompress_gpu_manager(
     }
     
     auto result = executeSafely([&]() {
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::decompressGPUManager(
             input_file,
-            output_path
+            output_path,
+            cppCallback
         );
     });
     
@@ -468,11 +607,28 @@ nvcomp_error_t nvcomp_compress_cpu(
     }
     
     auto result = executeSafely([&]() {
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressCPU(
             toCorealgo(algo),
             input_path,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -505,11 +661,28 @@ nvcomp_error_t nvcomp_compress_cpu_file_list(
             }
         }
         
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::compressCPUFileList(
             toCorealgo(algo),
             paths,
             output_file,
-            max_volume_size
+            max_volume_size,
+            cppCallback
         );
     });
     
@@ -532,10 +705,27 @@ nvcomp_error_t nvcomp_decompress_cpu(
     }
     
     auto result = executeSafely([&]() {
+        nvcomp_core::ProgressCallback cppCallback = nullptr;
+        if (handle && handle->block_callback) {
+            cppCallback = [handle](const nvcomp_core::BlockProgressInfo& info) {
+                nvcomp_progress_info_t c_info;
+                c_info.totalBlocks = info.totalBlocks;
+                c_info.completedBlocks = info.completedBlocks;
+                c_info.currentBlock = info.currentBlock;
+                c_info.currentBlockSize = info.currentBlockSize;
+                c_info.overallProgress = info.overallProgress;
+                c_info.currentBlockProgress = info.currentBlockProgress;
+                c_info.throughputMBps = info.throughputMBps;
+                c_info.stage = info.stage.c_str();
+                handle->reportBlockProgress(&c_info);
+            };
+        }
+        
         nvcomp_core::decompressCPU(
             toCorealgo(algo),
             input_file,
-            output_path
+            output_path,
+            cppCallback
         );
     });
     

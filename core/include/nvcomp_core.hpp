@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
 
 // Windows DLL export/import macros
 #ifdef _WIN32
@@ -33,6 +34,19 @@ constexpr uint64_t DEFAULT_VOLUME_SIZE = 2684354560ULL; // 2.5GB
 // ============================================================================
 // Data Structures
 // ============================================================================
+
+struct BlockProgressInfo {
+    int totalBlocks;
+    int completedBlocks;
+    int currentBlock;
+    size_t currentBlockSize;
+    float overallProgress;
+    float currentBlockProgress;
+    double throughputMBps;
+    std::string stage;
+};
+
+using ProgressCallback = std::function<void(const BlockProgressInfo&)>;
 
 struct ArchiveHeader {
     uint32_t magic;
@@ -98,6 +112,7 @@ NVCOMP_CORE_API bool isCudaAvailable();
 
 NVCOMP_CORE_API std::vector<uint8_t> readFile(const std::string& filename);
 NVCOMP_CORE_API void writeFile(const std::string& filename, const void* data, size_t size);
+NVCOMP_CORE_API void writeFile(const std::string& filename, const void* data, size_t size, ProgressCallback callback);
 NVCOMP_CORE_API std::string normalizePath(const std::string& path);
 NVCOMP_CORE_API std::string getRelativePath(const std::string& path, const std::string& base);
 NVCOMP_CORE_API bool isDirectory(const std::string& path);
@@ -117,9 +132,9 @@ NVCOMP_CORE_API bool checkGPUMemoryForVolume(uint64_t volumeSize);
 // Archive Operations
 // ============================================================================
 
-NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath);
-NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFile(const std::string& filePath);
-NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths);
+NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, ProgressCallback callback = nullptr);
+NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, ProgressCallback callback = nullptr);
+NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths, ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& outputPath);
 NVCOMP_CORE_API void listArchive(const std::vector<uint8_t>& archiveData);
 NVCOMP_CORE_API void listCompressedArchive(AlgoType algo, const std::string& inputFile, bool useCPU, bool cudaAvailable);
@@ -129,32 +144,41 @@ NVCOMP_CORE_API void listCompressedArchive(AlgoType algo, const std::string& inp
 // ============================================================================
 
 NVCOMP_CORE_API void compressGPUBatched(AlgoType algo, const std::string& inputPath, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize);
+                                         const std::string& outputFile, uint64_t maxVolumeSize,
+                                         ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize);
+                                         const std::string& outputFile, uint64_t maxVolumeSize,
+                                         ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void decompressGPUBatched(AlgoType algo, const std::string& inputFile, 
-                                           const std::string& outputPath);
+                                           const std::string& outputPath,
+                                           ProgressCallback callback = nullptr);
 
 // ============================================================================
 // GPU Compression (Manager API)
 // ============================================================================
 
 NVCOMP_CORE_API void compressGPUManager(AlgoType algo, const std::string& inputPath, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize);
+                                         const std::string& outputFile, uint64_t maxVolumeSize,
+                                         ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void compressGPUManagerFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize);
-NVCOMP_CORE_API void decompressGPUManager(const std::string& inputFile, const std::string& outputPath);
+                                         const std::string& outputFile, uint64_t maxVolumeSize,
+                                         ProgressCallback callback = nullptr);
+NVCOMP_CORE_API void decompressGPUManager(const std::string& inputFile, const std::string& outputPath,
+                                           ProgressCallback callback = nullptr);
 
 // ============================================================================
 // CPU Compression
 // ============================================================================
 
 NVCOMP_CORE_API void compressCPU(AlgoType algo, const std::string& inputPath, 
-                                  const std::string& outputFile, uint64_t maxVolumeSize);
+                                  const std::string& outputFile, uint64_t maxVolumeSize,
+                                  ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, 
-                                  const std::string& outputFile, uint64_t maxVolumeSize);
+                                  const std::string& outputFile, uint64_t maxVolumeSize,
+                                  ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void decompressCPU(AlgoType algo, const std::string& inputFile, 
-                                    const std::string& outputPath);
+                                    const std::string& outputPath,
+                                    ProgressCallback callback = nullptr);
 
 // Helper function for decompressing batched format (used by GPU decompression too)
 NVCOMP_CORE_API std::vector<uint8_t> decompressBatchedFormatCPU(AlgoType algo, 

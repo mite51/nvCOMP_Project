@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.18)
 # Qt GUI Application Configuration
 # ============================================================================
 
-project(nvcomp_gui LANGUAGES CXX)
+project(nvcomp_gui LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,9 @@ set(CMAKE_AUTOUIC_SEARCH_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 # Ensure Qt is found (should be checked by parent CMakeLists.txt)
 find_package(Qt6 COMPONENTS Core Widgets Gui Test REQUIRED)
 
+# Find CUDA for GPU monitoring
+find_package(CUDAToolkit REQUIRED)
+
 message(STATUS "Configuring nvcomp_gui application...")
 message(STATUS "  Qt6 version: ${Qt6_VERSION}")
 
@@ -33,6 +36,8 @@ set(GUI_SOURCES
     src/compression_worker.cpp
     src/archive_viewer.cpp
     src/settings_dialog.cpp
+    src/gpu_monitor.cpp
+    src/progress_widget.cpp
 )
 
 set(GUI_HEADERS
@@ -40,6 +45,8 @@ set(GUI_HEADERS
     src/compression_worker.h
     src/archive_viewer.h
     src/settings_dialog.h
+    src/gpu_monitor.h
+    src/progress_widget.h
 )
 
 set(GUI_UI_FILES
@@ -82,6 +89,7 @@ target_link_libraries(nvcomp_gui PRIVATE
     Qt6::Widgets
     Qt6::Gui
     nvcomp_core  # Link to our compression core library
+    CUDA::cudart  # Link CUDA runtime for GPU monitoring
 )
 
 # ============================================================================
@@ -166,6 +174,8 @@ if(BUILD_TESTS)
         src/compression_worker.cpp  # Include worker source
         src/archive_viewer.cpp  # Include archive viewer source
         src/settings_dialog.cpp  # Include settings dialog source
+        src/gpu_monitor.cpp  # Include GPU monitor source
+        src/progress_widget.cpp  # Include progress widget source
     )
     
     target_include_directories(test_mainwindow PRIVATE
@@ -180,6 +190,7 @@ if(BUILD_TESTS)
         Qt6::Gui
         Qt6::Test
         nvcomp_core
+        CUDA::cudart  # Link CUDA runtime for GPU monitoring
     )
     
     # Platform-specific test configuration

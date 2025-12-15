@@ -406,30 +406,30 @@ static void compressCPUFromBuffer(AlgoType algo, const std::vector<uint8_t>& arc
 }
 
 // Public wrapper for single file/folder compression
-void compressCPU(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressCPU(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     // Create archive (handles both files and directories)
     std::vector<uint8_t> archiveData;
     if (isDirectory(inputPath)) {
-        archiveData = createArchiveFromFolder(inputPath);
+        archiveData = createArchiveFromFolder(inputPath, callback);
     } else {
-        archiveData = createArchiveFromFile(inputPath);
+        archiveData = createArchiveFromFile(inputPath, callback);
     }
     
     // Call internal function with archive data
     compressCPUFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
-void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize) {
+void compressCPUFileList(AlgoType algo, const std::vector<std::string>& filePaths, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback) {
     std::cout << "Compressing file list (" << filePaths.size() << " files)..." << std::endl;
     
     // Create archive from file list (in memory)
-    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths);
+    std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths, callback);
     
     // Compress directly from buffer - no temporary file needed!
     compressCPUFromBuffer(algo, archiveData, outputFile, maxVolumeSize);
 }
 
-void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputPath) {
+void decompressCPU(AlgoType algo, const std::string& inputFile, const std::string& outputPath, ProgressCallback callback) {
     // Detect volume files
     auto volumeFiles = detectVolumeFiles(inputFile);
     
