@@ -513,6 +513,8 @@
      <string>&amp;Tools</string>
     </property>
     <addaction name="actionViewArchive"/>
+    <addaction name="separator"/>
+    <addaction name="actionSettings"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
     <property name="title">
@@ -558,6 +560,17 @@
    </property>
    <property name="toolTip">
     <string>Open and view the contents of a compressed archive</string>
+   </property>
+  </action>
+  <action name="actionSettings">
+   <property name="text">
+    <string>&amp;Settings...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+,</string>
+   </property>
+   <property name="toolTip">
+    <string>Configure application settings and preferences</string>
    </property>
   </action>
  </widget>

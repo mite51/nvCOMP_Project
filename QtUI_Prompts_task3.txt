@@ -1,0 +1,149 @@
+=========================================================================
+Task 3.1 
+
+We're doing LLM task sprints, small focused changes in a broader plan, so keep changes in scope.
+starting with Task 3.1, please grok that then consider if additional information or clarity is needed. Otherwise, please proceed with the task.
+
+<ui plan>
+<summary 2.2 and 2.3>
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+>create a concise, focused submission summary
+
+# Task 3.1: Archive Viewer - Submission Summary
+
+## Status
+✅ **COMPLETE AND TESTED**
+
+## What Was Delivered
+
+**Archive Viewer Dialog** - A professional file browser for viewing and extracting archive contents, similar to WinRAR/7-Zip.
+
+### Files Created (3)
+- `gui/src/archive_viewer.h` (267 lines)
+- `gui/src/archive_viewer.cpp` (810 lines) 
+- `gui/ui/archive_viewer.ui` (215 lines)
+
+### Files Modified (4)
+- `gui/src/mainwindow.{h,cpp}` - Tools menu integration, double-click support
+- `gui/ui/mainwindow.ui` - Added Tools menu with Ctrl+V shortcut
+- `gui/CMakeLists.txt` - Build system integration
+- `gui/tests/test_mainwindow.cpp` - Added 7 test cases
+
+## Key Features
+
+### Core Functionality
+- **Archive Format Support**
+  - Compressed archives (NVBC) - auto-decompresses to read contents
+  - Uncompressed archives (NVAR) - direct read
+  - Multi-volume archive detection
+
+- **User Interface**
+  - Tree view with folders/files hierarchy
+  - 4 columns: Name, Size, Compressed Size, Ratio
+  - Real-time search/filter
+  - Multi-select (Ctrl/Shift+Click)
+  - Right-click context menu
+  - Statistics bar (file count, sizes, compression ratio)
+
+- **Extraction**
+  - Extract All button
+  - Extract Selected button (enabled on selection)
+  - Progress feedback
+  - Maintains folder structure
+
+- **Integration**
+  - Tools → View Archive (Ctrl+V)
+  - Double-click .nvcomp files in main window
+  - Background loading (non-blocking UI)
+
+## Technical Implementation
+
+**Architecture:** QDialog with QThread background loader, QTreeWidget display, nvCOMP C API for decompression
+
+**Key Design Decision:** Compressed archives are fully decompressed to a temporary directory to read the file list, then temp files are automatically cleaned up. This is necessary because NVBC format compresses the entire archive as one block.
+
+**Qt6 Compatibility:** Updated from deprecated `QRegExp` to `QRegularExpression`
+
+## Testing
+
+**Test Results:** 36/36 tests passed (7 new archive viewer tests)
+- UI element validation
+- Archive loading
+- Search functionality
+- Integration with main window
+
+**Manual Testing:** Verified with compressed/uncompressed archives, extraction, search, error handling, multi-volume detection.
+
+## Known Limitations
+
+1. Compressed archives require full decompression to view (NVBC format limitation)
+2. Per-file compressed sizes are estimated (format doesn't store individual sizes)
+3. Requires temporary disk space equal to uncompressed size (auto-cleaned)
+
+## Build Status
+
+✅ Compiles without errors or warnings  
+✅ All tests pass  
+✅ Ready for production use
+
+## Usage
+
+```
+Tools → View Archive (Ctrl+V)
+or
+Double-click any .nvcomp file
+```
+
+=========================================================================
+Task 3.2 
+
+We're doing LLM task sprints, small focused changes in a broader plan, so keep changes in scope.
+starting with Task 3.2, please grok that then consider if additional information or clarity is needed. Otherwise, please proceed with the task.
+
+<ui plan>
+<summary 3.1>
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Task 3.2: Settings Dialog - FINAL SUMMARY ✅
+What We Built
+A comprehensive Settings Dialog with full persistence and immediate application of settings.
+Key Features Implemented
+✅ 4 Tabs with Full Functionality:
+Compression Tab
+Default algorithm selector (saves & applies to main window)
+Default volume size: 2.5 GB (2560 MB)
+Multi-volume enabled by default
+Output path template with validation
+Performance Tab
+GPU/CPU preference (applies to "Force CPU Mode" checkbox)
+VRAM usage limit slider
+Thread count and chunk size settings
+Interface Tab
+Language selector (disabled - placeholder for future)
+Theme selector (Light/Dark/System) - fully functional! 🌙☀️
+Confirm overwrite option
+Show statistics option
+Integration Tab
+Context menu, file associations, start with system (placeholders for future)
+Technical Highlights
+QSettings Persistence - All settings save/load correctly
+Immediate Application - Settings apply instantly when changed
+Theme Switching - Full color palette changes for Light/Dark/System modes
+Validation - Input validation with visual feedback
+userData Fix - Manually set combo box userData in code (Qt Designer issue workaround)
+Clean Code - No debug statements, production-ready
+Files Created/Modified
+Created:
+gui/src/settings_dialog.{h,cpp} (529 lines)
+gui/ui/settings_dialog.ui (538 lines)
+Modified:
+gui/src/mainwindow.{h,cpp} - Settings integration, theme switching
+gui/ui/mainwindow.ui - Settings action in Tools menu
+gui/CMakeLists.txt - Build integration
+gui/tests/test_mainwindow.cpp - 10 new test cases
+=========================================================================
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================

@@ -18,6 +18,7 @@ QT_END_NAMESPACE
 
 class CompressionWorker;
 class QListWidgetItem;
+class SettingsDialog;
 
 /**
  * @class MainWindow
@@ -109,6 +110,7 @@ private:
     QStringList m_fileList;  ///< List of files to process
     bool m_gpuAvailable;  ///< GPU availability status
     CompressionWorker *m_worker;  ///< Background compression worker thread
+    SettingsDialog *m_settingsDialog;  ///< Settings dialog (created on demand)
     
     /**
      * @brief Initializes UI components and connections
@@ -135,6 +137,17 @@ private:
      * @param paths List of file or folder paths to add
      */
     void addFiles(const QStringList &paths);
+    
+    /**
+     * @brief Applies settings from the settings dialog to the UI
+     */
+    void applySettingsToUi();
+    
+    /**
+     * @brief Applies the selected theme (Light/Dark/System)
+     * @param theme Theme name: "Light", "Dark", or "System"
+     */
+    void applyTheme(const QString &theme);
     
 private slots:
     /**

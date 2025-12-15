@@ -1,0 +1,652 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SettingsDialog</class>
+ <widget class="QDialog" name="SettingsDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>600</width>
+    <height>500</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Settings</string>
+  </property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <property name="spacing">
+    <number>12</number>
+   </property>
+   <property name="leftMargin">
+    <number>12</number>
+   </property>
+   <property name="topMargin">
+    <number>12</number>
+   </property>
+   <property name="rightMargin">
+    <number>12</number>
+   </property>
+   <property name="bottomMargin">
+    <number>12</number>
+   </property>
+   <item>
+    <widget class="QTabWidget" name="tabWidget">
+     <property name="currentIndex">
+      <number>0</number>
+     </property>
+     <!-- Tab 1: Compression -->
+     <widget class="QWidget" name="tabCompression">
+      <attribute name="title">
+       <string>Compression</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="compressionLayout">
+       <property name="spacing">
+        <number>12</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="groupBoxDefaults">
+         <property name="title">
+          <string>Default Settings</string>
+         </property>
+         <layout class="QFormLayout" name="defaultsFormLayout">
+          <property name="horizontalSpacing">
+           <number>12</number>
+          </property>
+          <property name="verticalSpacing">
+           <number>10</number>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelDefaultAlgorithm">
+            <property name="text">
+             <string>Default Algorithm:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="comboBoxDefaultAlgorithm">
+            <property name="toolTip">
+             <string>Algorithm to use by default when compressing</string>
+            </property>
+            <item>
+             <property name="text">
+              <string>LZ4 - Fast compression</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>LZ4</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Snappy - Very fast compression</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>Snappy</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Zstd - Best compression</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>Zstd</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>GDeflate - GPU-optimized DEFLATE</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>GDeflate</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>ANS - Asymmetric Numeral Systems</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>ANS</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Bitcomp - Lossless numerical</string>
+             </property>
+             <property name="userData" stdset="0">
+              <string>Bitcomp</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelDefaultVolumeSize">
+            <property name="text">
+             <string>Default Volume Size (MB):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinBoxDefaultVolumeSize">
+            <property name="toolTip">
+             <string>Default size for volume splitting (in MB)</string>
+            </property>
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>10000</number>
+            </property>
+            <property name="value">
+             <number>100</number>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="0" colspan="2">
+           <widget class="QCheckBox" name="checkBoxDefaultEnableVolumes">
+            <property name="text">
+             <string>Enable multi-volume by default</string>
+            </property>
+            <property name="toolTip">
+             <string>Automatically enable volume splitting for large files</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxOutputPath">
+         <property name="title">
+          <string>Output Path Template</string>
+         </property>
+         <layout class="QVBoxLayout" name="outputPathLayout">
+          <item>
+           <widget class="QLineEdit" name="lineEditOutputTemplate">
+            <property name="text">
+             <string>{filename}.nvcomp</string>
+            </property>
+            <property name="toolTip">
+             <string>Output path template. Use {filename} for original name.</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="labelTemplateHelp">
+            <property name="text">
+             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-style:italic; color:#808080;&quot;&gt;Available placeholders: {filename}, {ext}, {date}, {time}&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="compressionSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <!-- Tab 2: Performance -->
+     <widget class="QWidget" name="tabPerformance">
+      <attribute name="title">
+       <string>Performance</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="performanceLayout">
+       <property name="spacing">
+        <number>12</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="groupBoxProcessing">
+         <property name="title">
+          <string>Processing Mode</string>
+         </property>
+         <layout class="QVBoxLayout" name="processingLayout">
+          <item>
+           <widget class="QRadioButton" name="radioButtonPreferGpu">
+            <property name="text">
+             <string>Prefer GPU (faster, requires CUDA)</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+            <property name="toolTip">
+             <string>Use GPU acceleration when available</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QRadioButton" name="radioButtonPreferCpu">
+            <property name="text">
+             <string>Prefer CPU (slower, works everywhere)</string>
+            </property>
+            <property name="toolTip">
+             <string>Always use CPU mode, even if GPU is available</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxGpuSettings">
+         <property name="title">
+          <string>GPU Settings</string>
+         </property>
+         <layout class="QFormLayout" name="gpuFormLayout">
+          <property name="horizontalSpacing">
+           <number>12</number>
+          </property>
+          <property name="verticalSpacing">
+           <number>10</number>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelVramLimit">
+            <property name="text">
+             <string>VRAM Usage Limit (%):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <layout class="QHBoxLayout" name="vramLimitLayout">
+            <item>
+             <widget class="QSlider" name="sliderVramLimit">
+              <property name="minimum">
+               <number>10</number>
+              </property>
+              <property name="maximum">
+               <number>95</number>
+              </property>
+              <property name="value">
+               <number>80</number>
+              </property>
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+              <property name="toolTip">
+               <string>Maximum percentage of VRAM to use for compression</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="labelVramValue">
+              <property name="text">
+               <string>80%</string>
+              </property>
+              <property name="minimumSize">
+               <size>
+                <width>40</width>
+                <height>0</height>
+               </size>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxCpuSettings">
+         <property name="title">
+          <string>CPU Settings</string>
+         </property>
+         <layout class="QFormLayout" name="cpuFormLayout">
+          <property name="horizontalSpacing">
+           <number>12</number>
+          </property>
+          <property name="verticalSpacing">
+           <number>10</number>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelThreadCount">
+            <property name="text">
+             <string>Thread Count:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QSpinBox" name="spinBoxThreadCount">
+            <property name="toolTip">
+             <string>Number of CPU threads to use for compression</string>
+            </property>
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>64</number>
+            </property>
+            <property name="value">
+             <number>4</number>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelChunkSize">
+            <property name="text">
+             <string>Chunk Size (MB):</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QSpinBox" name="spinBoxChunkSize">
+            <property name="toolTip">
+             <string>Size of each processing chunk (in MB)</string>
+            </property>
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>1024</number>
+            </property>
+            <property name="value">
+             <number>128</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="performanceSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <!-- Tab 3: Interface -->
+     <widget class="QWidget" name="tabInterface">
+      <attribute name="title">
+       <string>Interface</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="interfaceLayout">
+       <property name="spacing">
+        <number>12</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="groupBoxAppearance">
+         <property name="title">
+          <string>Appearance</string>
+         </property>
+         <layout class="QFormLayout" name="appearanceFormLayout">
+          <property name="horizontalSpacing">
+           <number>12</number>
+          </property>
+          <property name="verticalSpacing">
+           <number>10</number>
+          </property>
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelLanguage">
+            <property name="text">
+             <string>Language:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="comboBoxLanguage">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
+            <property name="toolTip">
+             <string>Application language (not yet implemented)</string>
+            </property>
+            <item>
+             <property name="text">
+              <string>English</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Spanish</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Chinese (Simplified)</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>French</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>German</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelTheme">
+            <property name="text">
+             <string>Theme:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QComboBox" name="comboBoxTheme">
+            <property name="toolTip">
+             <string>Application theme</string>
+            </property>
+            <item>
+             <property name="text">
+              <string>System</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Light</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Dark</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupBoxBehavior">
+         <property name="title">
+          <string>Behavior</string>
+         </property>
+         <layout class="QVBoxLayout" name="behaviorLayout">
+          <item>
+           <widget class="QCheckBox" name="checkBoxConfirmOverwrite">
+            <property name="text">
+             <string>Confirm before overwriting files</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+            <property name="toolTip">
+             <string>Show confirmation dialog before overwriting existing files</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="checkBoxShowStatistics">
+            <property name="text">
+             <string>Show statistics after compression</string>
+            </property>
+            <property name="checked">
+             <bool>true</bool>
+            </property>
+            <property name="toolTip">
+             <string>Display compression statistics when operation completes</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <spacer name="interfaceSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+     <!-- Tab 4: Integration -->
+     <widget class="QWidget" name="tabIntegration">
+      <attribute name="title">
+       <string>Integration</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="integrationLayout">
+       <property name="spacing">
+        <number>12</number>
+       </property>
+       <item>
+        <widget class="QGroupBox" name="groupBoxSystemIntegration">
+         <property name="title">
+          <string>System Integration</string>
+         </property>
+         <layout class="QVBoxLayout" name="systemIntegrationLayout">
+          <item>
+           <widget class="QCheckBox" name="checkBoxEnableContextMenu">
+            <property name="text">
+             <string>Enable context menu integration</string>
+            </property>
+            <property name="toolTip">
+             <string>Add "Compress with nvCOMP" to right-click menu (requires administrator privileges)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="checkBoxEnableFileAssociations">
+            <property name="text">
+             <string>Enable file associations</string>
+            </property>
+            <property name="toolTip">
+             <string>Associate compressed file extensions with nvCOMP (requires administrator privileges)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="checkBoxStartWithSystem">
+            <property name="text">
+             <string>Start with system</string>
+            </property>
+            <property name="toolTip">
+             <string>Launch nvCOMP automatically when system starts</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="labelIntegrationNote">
+         <property name="text">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-style:italic; color:#808080;&quot;&gt;Note: Some integration features require administrator privileges and will be available in future versions.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="integrationSpacer">
+         <property name="orientation">
+          <enum>Qt::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+   <item>
+    <!-- Bottom buttons -->
+    <layout class="QHBoxLayout" name="bottomButtonsLayout">
+     <item>
+      <widget class="QPushButton" name="buttonRestoreDefaults">
+       <property name="text">
+        <string>Restore Defaults</string>
+       </property>
+       <property name="toolTip">
+        <string>Reset all settings to default values</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="bottomSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QDialogButtonBox" name="buttonBox">
+       <property name="standardButtons">
+        <set>QDialogButtonBox::Apply|QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <connections>
+  <!-- Update VRAM label when slider changes -->
+  <connection>
+   <sender>sliderVramLimit</sender>
+   <signal>valueChanged(int)</signal>
+   <receiver>labelVramValue</receiver>
+   <slot>setNum(int)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>300</x>
+     <y>200</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>500</x>
+     <y>200</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+</ui>
+

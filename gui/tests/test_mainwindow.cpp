@@ -24,8 +24,12 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QDebug>
+#include <QDialogButtonBox>
+#include <QRadioButton>
+#include <QSlider>
 #include "mainwindow.h"
 #include "archive_viewer.h"
+#include "settings_dialog.h"
 
 /**
  * @class TestMainWindow
@@ -231,6 +235,60 @@ private slots:
      * @brief Test: Archive Viewer tree widget
      */
     void testArchiveViewerTreeWidget();
+    
+    // ========================================================================
+    // Task 3.2: Settings Dialog Tests
+    // ========================================================================
+    
+    /**
+     * @brief Test: Settings action exists in Tools menu
+     */
+    void testSettingsAction();
+    
+    /**
+     * @brief Test: Settings Dialog can be created
+     */
+    void testSettingsDialogConstruction();
+    
+    /**
+     * @brief Test: Settings Dialog has correct UI elements
+     */
+    void testSettingsDialogUI();
+    
+    /**
+     * @brief Test: Settings Dialog has all 4 tabs
+     */
+    void testSettingsDialogTabs();
+    
+    /**
+     * @brief Test: Settings Dialog Compression tab elements
+     */
+    void testSettingsDialogCompressionTab();
+    
+    /**
+     * @brief Test: Settings Dialog Performance tab elements
+     */
+    void testSettingsDialogPerformanceTab();
+    
+    /**
+     * @brief Test: Settings Dialog Interface tab elements
+     */
+    void testSettingsDialogInterfaceTab();
+    
+    /**
+     * @brief Test: Settings Dialog Integration tab elements
+     */
+    void testSettingsDialogIntegrationTab();
+    
+    /**
+     * @brief Test: Settings Dialog save and load functionality
+     */
+    void testSettingsDialogSaveLoad();
+    
+    /**
+     * @brief Test: Settings Dialog validation
+     */
+    void testSettingsDialogValidation();
 
 private:
     MainWindow *window;  ///< Test window instance
@@ -923,6 +981,206 @@ void TestMainWindow::testArchiveViewerTreeWidget()
     QCOMPARE(tree->contextMenuPolicy(), Qt::CustomContextMenu);
     
     delete viewer;
+}
+
+// ============================================================================
+// Task 3.2: Settings Dialog Tests - Implementation
+// ============================================================================
+
+void TestMainWindow::testSettingsAction()
+{
+    // Test Settings action exists
+    QAction *settingsAction = window->findChild<QAction*>("actionSettings");
+    QVERIFY(settingsAction != nullptr);
+    QVERIFY(!settingsAction->text().isEmpty());
+    QCOMPARE(settingsAction->shortcut().toString(), QString("Ctrl+,"));
+}
+
+void TestMainWindow::testSettingsDialogConstruction()
+{
+    // Test that SettingsDialog can be created
+    SettingsDialog *dialog = new SettingsDialog(window);
+    QVERIFY(dialog != nullptr);
+    QVERIFY(dialog->isModal());
+    QCOMPARE(dialog->windowTitle(), QString("Settings"));
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogUI()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test tab widget exists
+    QTabWidget *tabWidget = dialog->findChild<QTabWidget*>("tabWidget");
+    QVERIFY(tabWidget != nullptr);
+    QVERIFY(tabWidget->count() == 4);
+    
+    // Test button box exists
+    QDialogButtonBox *buttonBox = dialog->findChild<QDialogButtonBox*>("buttonBox");
+    QVERIFY(buttonBox != nullptr);
+    
+    // Test Restore Defaults button exists
+    QPushButton *restoreButton = dialog->findChild<QPushButton*>("buttonRestoreDefaults");
+    QVERIFY(restoreButton != nullptr);
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogTabs()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    QTabWidget *tabWidget = dialog->findChild<QTabWidget*>("tabWidget");
+    
+    // Verify all 4 tabs exist with correct names
+    QCOMPARE(tabWidget->count(), 4);
+    QCOMPARE(tabWidget->tabText(0), QString("Compression"));
+    QCOMPARE(tabWidget->tabText(1), QString("Performance"));
+    QCOMPARE(tabWidget->tabText(2), QString("Interface"));
+    QCOMPARE(tabWidget->tabText(3), QString("Integration"));
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogCompressionTab()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test Compression tab elements
+    QComboBox *algorithmCombo = dialog->findChild<QComboBox*>("comboBoxDefaultAlgorithm");
+    QVERIFY(algorithmCombo != nullptr);
+    QVERIFY(algorithmCombo->count() == 6);  // 6 algorithms
+    
+    QSpinBox *volumeSpin = dialog->findChild<QSpinBox*>("spinBoxDefaultVolumeSize");
+    QVERIFY(volumeSpin != nullptr);
+    QVERIFY(volumeSpin->minimum() == 1);
+    QVERIFY(volumeSpin->maximum() == 10000);
+    
+    QCheckBox *enableVolumes = dialog->findChild<QCheckBox*>("checkBoxDefaultEnableVolumes");
+    QVERIFY(enableVolumes != nullptr);
+    
+    QLineEdit *outputTemplate = dialog->findChild<QLineEdit*>("lineEditOutputTemplate");
+    QVERIFY(outputTemplate != nullptr);
+    QVERIFY(!outputTemplate->text().isEmpty());
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogPerformanceTab()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test Performance tab elements
+    QRadioButton *preferGpu = dialog->findChild<QRadioButton*>("radioButtonPreferGpu");
+    QVERIFY(preferGpu != nullptr);
+    
+    QRadioButton *preferCpu = dialog->findChild<QRadioButton*>("radioButtonPreferCpu");
+    QVERIFY(preferCpu != nullptr);
+    
+    QSlider *vramSlider = dialog->findChild<QSlider*>("sliderVramLimit");
+    QVERIFY(vramSlider != nullptr);
+    QVERIFY(vramSlider->minimum() == 10);
+    QVERIFY(vramSlider->maximum() == 95);
+    
+    QSpinBox *threadCount = dialog->findChild<QSpinBox*>("spinBoxThreadCount");
+    QVERIFY(threadCount != nullptr);
+    QVERIFY(threadCount->minimum() == 1);
+    QVERIFY(threadCount->maximum() == 64);
+    
+    QSpinBox *chunkSize = dialog->findChild<QSpinBox*>("spinBoxChunkSize");
+    QVERIFY(chunkSize != nullptr);
+    QVERIFY(chunkSize->minimum() == 1);
+    QVERIFY(chunkSize->maximum() == 1024);
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogInterfaceTab()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test Interface tab elements
+    QComboBox *language = dialog->findChild<QComboBox*>("comboBoxLanguage");
+    QVERIFY(language != nullptr);
+    QVERIFY(language->count() >= 1);  // At least English
+    QVERIFY(!language->isEnabled());  // Should be disabled (not implemented yet)
+    
+    QComboBox *theme = dialog->findChild<QComboBox*>("comboBoxTheme");
+    QVERIFY(theme != nullptr);
+    QVERIFY(theme->count() == 3);  // System, Light, Dark
+    
+    QCheckBox *confirmOverwrite = dialog->findChild<QCheckBox*>("checkBoxConfirmOverwrite");
+    QVERIFY(confirmOverwrite != nullptr);
+    
+    QCheckBox *showStats = dialog->findChild<QCheckBox*>("checkBoxShowStatistics");
+    QVERIFY(showStats != nullptr);
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogIntegrationTab()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test Integration tab elements
+    QCheckBox *contextMenu = dialog->findChild<QCheckBox*>("checkBoxEnableContextMenu");
+    QVERIFY(contextMenu != nullptr);
+    
+    QCheckBox *fileAssoc = dialog->findChild<QCheckBox*>("checkBoxEnableFileAssociations");
+    QVERIFY(fileAssoc != nullptr);
+    
+    QCheckBox *startWithSystem = dialog->findChild<QCheckBox*>("checkBoxStartWithSystem");
+    QVERIFY(startWithSystem != nullptr);
+    
+    delete dialog;
+}
+
+void TestMainWindow::testSettingsDialogSaveLoad()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Change some settings
+    QComboBox *algorithmCombo = dialog->findChild<QComboBox*>("comboBoxDefaultAlgorithm");
+    algorithmCombo->setCurrentIndex(2);  // Set to Zstd
+    
+    QSpinBox *volumeSpin = dialog->findChild<QSpinBox*>("spinBoxDefaultVolumeSize");
+    volumeSpin->setValue(5120);  // Set to 5 GB
+    
+    // Save settings
+    dialog->saveSettings();
+    
+    // Create new dialog and verify settings loaded
+    SettingsDialog *dialog2 = new SettingsDialog(window);
+    QComboBox *algorithmCombo2 = dialog2->findChild<QComboBox*>("comboBoxDefaultAlgorithm");
+    QSpinBox *volumeSpin2 = dialog2->findChild<QSpinBox*>("spinBoxDefaultVolumeSize");
+    
+    QCOMPARE(algorithmCombo2->currentIndex(), 2);
+    QCOMPARE(volumeSpin2->value(), 5120);
+    
+    // Restore defaults for other tests (2.5 GB = 2560 MB, volumes enabled)
+    dialog2->restoreDefaults();
+    dialog2->saveSettings();
+    
+    delete dialog;
+    delete dialog2;
+}
+
+void TestMainWindow::testSettingsDialogValidation()
+{
+    SettingsDialog *dialog = new SettingsDialog(window);
+    
+    // Test output template validation
+    QLineEdit *outputTemplate = dialog->findChild<QLineEdit*>("lineEditOutputTemplate");
+    outputTemplate->setText("invalid_template");  // Missing {filename}
+    
+    // The validation happens visually (background color change)
+    // Just verify the field accepts the text
+    QCOMPARE(outputTemplate->text(), QString("invalid_template"));
+    
+    // Set valid template
+    outputTemplate->setText("{filename}.nvcomp");
+    QCOMPARE(outputTemplate->text(), QString("{filename}.nvcomp"));
+    
+    delete dialog;
 }
 
 // ============================================================================

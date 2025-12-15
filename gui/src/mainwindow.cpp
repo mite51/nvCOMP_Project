@@ -7,8 +7,12 @@
 #include "ui_mainwindow.h"
 #include "compression_worker.h"
 #include "archive_viewer.h"
+#include "settings_dialog.h"
 #include <QMessageBox>
 #include <QApplication>
+#include <QPalette>
+#include <QStyleHints>
+#include <QColor>
 #include <QFileDialog>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -51,12 +55,14 @@ MainWindow::MainWindow(QWidget *parent)
     , m_initialized(false)
     , m_gpuAvailable(false)
     , m_worker(nullptr)
+    , m_settingsDialog(nullptr)
 {
     ui->setupUi(this);
     setupUi();
     setupConnections();
     checkGpuAvailability();
     updateUiState();
+    applySettingsToUi();  // Load and apply saved settings
     m_initialized = true;
 }
 
@@ -76,6 +82,12 @@ MainWindow::~MainWindow()
         m_worker = nullptr;
     }
     
+    // Clean up settings dialog if it exists
+    if (m_settingsDialog) {
+        delete m_settingsDialog;
+        m_settingsDialog = nullptr;
+    }
+    
     delete ui;
 }
 
@@ -90,6 +102,14 @@ void MainWindow::setupUi()
     
     // Enable drag and drop
     setAcceptDrops(true);
+    
+    // Manually set userData for algorithm combo box (Qt Designer userData sometimes doesn't work)
+    ui->comboBoxAlgorithm->setItemData(0, "LZ4");
+    ui->comboBoxAlgorithm->setItemData(1, "Snappy");
+    ui->comboBoxAlgorithm->setItemData(2, "Zstd");
+    ui->comboBoxAlgorithm->setItemData(3, "GDeflate");
+    ui->comboBoxAlgorithm->setItemData(4, "ANS");
+    ui->comboBoxAlgorithm->setItemData(5, "Bitcomp");
     
     // Center window on screen (will be enhanced in future tasks)
     // For now, let Qt position it
@@ -116,6 +136,11 @@ void MainWindow::setupConnections()
     if (ui->actionViewArchive) {
         connect(ui->actionViewArchive, &QAction::triggered,
                 this, &MainWindow::onViewArchiveTriggered);
+    }
+    
+    if (ui->actionSettings) {
+        connect(ui->actionSettings, &QAction::triggered,
+                this, &MainWindow::onSettingsClicked);
     }
     
     // Connect file list double-click
@@ -581,11 +606,20 @@ void MainWindow::onDecompressClicked()
 
 void MainWindow::onSettingsClicked()
 {
-    // Stub for now - will be implemented in future tasks
-    QMessageBox::information(this,
-        tr("Settings"),
-        tr("Settings dialog will be implemented in Task 2.4: Settings and Configuration")
-    );
+    // Create settings dialog on demand
+    if (!m_settingsDialog) {
+        m_settingsDialog = new SettingsDialog(this);
+        
+        // Connect to settings applied signal
+        connect(m_settingsDialog, &SettingsDialog::settingsApplied,
+                this, &MainWindow::applySettingsToUi);
+    } else {
+        // Reload settings if dialog already exists
+        m_settingsDialog->loadSettings();
+    }
+    
+    // Show the dialog
+    m_settingsDialog->exec();
 }
 
 void MainWindow::onAlgorithmChanged(int index)
@@ -799,6 +833,102 @@ void MainWindow::onFileListDoubleClicked(QListWidgetItem* item)
         QMessageBox::information(this, tr("File Info"),
             tr("File: %1\n\nDouble-click archive files (*.nvcomp) to view their contents.")
                 .arg(fileInfo.fileName()));
+    }
+}
+
+void MainWindow::applySettingsToUi()
+{
+    // Create a temporary settings object to read values
+    QSettings settings("nvCOMP", "nvCOMP GUI");
+    
+    // Apply compression settings - default algorithm
+    QString defaultAlgorithm = settings.value("compression/defaultAlgorithm", "LZ4").toString();
+    int algorithmIndex = ui->comboBoxAlgorithm->findData(defaultAlgorithm);
+    if (algorithmIndex >= 0) {
+        ui->comboBoxAlgorithm->setCurrentIndex(algorithmIndex);
+    }
+    
+    // Apply compression settings - default volume size (2.5 GB = 2560 MB)
+    int defaultVolumeSize = settings.value("compression/defaultVolumeSize", 2560).toInt();
+    ui->spinBoxVolumeSize->setValue(defaultVolumeSize);
+    
+    // Apply compression settings - enable volumes by default
+    bool defaultEnableVolumes = settings.value("compression/defaultEnableVolumes", true).toBool();
+    ui->checkBoxVolumes->setChecked(defaultEnableVolumes);
+    
+    // Apply performance settings - CPU/GPU preference
+    bool preferGpu = settings.value("performance/preferGpu", true).toBool();
+    // If GPU not available, force CPU mode regardless of preference
+    if (!m_gpuAvailable) {
+        ui->checkBoxCpuMode->setChecked(true);
+    } else {
+        // Apply the "Prefer CPU" setting to "Force CPU Mode" checkbox
+        ui->checkBoxCpuMode->setChecked(!preferGpu);
+    }
+    
+    // Apply interface settings - theme
+    QString theme = settings.value("interface/theme", "System").toString();
+    applyTheme(theme);
+    
+    // Note: Other settings like thread count, chunk size, VRAM limit are used by
+    // the compression worker internally and don't need UI updates here
+    
+    statusBar()->showMessage("Settings applied", 2000);
+}
+
+void MainWindow::applyTheme(const QString &theme)
+{
+    if (theme == "Dark") {
+        // Apply dark palette
+        QPalette darkPalette;
+        darkPalette.setColor(QPalette::Window, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::WindowText, Qt::white);
+        darkPalette.setColor(QPalette::Base, QColor(35, 35, 35));
+        darkPalette.setColor(QPalette::AlternateBase, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::ToolTipBase, QColor(25, 25, 25));
+        darkPalette.setColor(QPalette::ToolTipText, Qt::white);
+        darkPalette.setColor(QPalette::Text, Qt::white);
+        darkPalette.setColor(QPalette::Button, QColor(53, 53, 53));
+        darkPalette.setColor(QPalette::ButtonText, Qt::white);
+        darkPalette.setColor(QPalette::BrightText, Qt::red);
+        darkPalette.setColor(QPalette::Link, QColor(42, 130, 218));
+        darkPalette.setColor(QPalette::Highlight, QColor(42, 130, 218));
+        darkPalette.setColor(QPalette::HighlightedText, Qt::black);
+        
+        // Disabled colors
+        darkPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(127, 127, 127));
+        darkPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(127, 127, 127));
+        darkPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(127, 127, 127));
+        
+        qApp->setPalette(darkPalette);
+        
+    } else if (theme == "Light") {
+        // Apply light palette (default Qt palette)
+        QPalette lightPalette;
+        lightPalette.setColor(QPalette::Window, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::WindowText, Qt::black);
+        lightPalette.setColor(QPalette::Base, Qt::white);
+        lightPalette.setColor(QPalette::AlternateBase, QColor(245, 245, 245));
+        lightPalette.setColor(QPalette::ToolTipBase, QColor(255, 255, 220));
+        lightPalette.setColor(QPalette::ToolTipText, Qt::black);
+        lightPalette.setColor(QPalette::Text, Qt::black);
+        lightPalette.setColor(QPalette::Button, QColor(240, 240, 240));
+        lightPalette.setColor(QPalette::ButtonText, Qt::black);
+        lightPalette.setColor(QPalette::BrightText, Qt::red);
+        lightPalette.setColor(QPalette::Link, QColor(0, 0, 255));
+        lightPalette.setColor(QPalette::Highlight, QColor(0, 120, 215));
+        lightPalette.setColor(QPalette::HighlightedText, Qt::white);
+        
+        // Disabled colors
+        lightPalette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(120, 120, 120));
+        lightPalette.setColor(QPalette::Disabled, QPalette::Text, QColor(120, 120, 120));
+        lightPalette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(120, 120, 120));
+        
+        qApp->setPalette(lightPalette);
+        
+    } else {
+        // "System" - use default system palette
+        qApp->setPalette(qApp->style()->standardPalette());
     }
 }
 
