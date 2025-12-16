@@ -2,7 +2,7 @@
 
 ## Progress Status
 
-**Last Updated:** December 13, 2024
+**Last Updated:** December 15, 2024
 
 ### ✅ Phase 1: Core Refactoring - COMPLETE
 - ✅ Task 1.1: Core Library Extraction (27/27 tests passing)
@@ -16,11 +16,11 @@
 - ✅ Task 2.3: Compression Worker Thread (background processing, progress tracking)
 - ✅ Task 2.4: Compress/Decompress Functionality (working end-to-end)
 
-### 🔄 Phase 3: Advanced Features - NOT STARTED
+### 🔄 Phase 3: Advanced Features - IN PROGRESS
 - ⏳ Task 3.1: Archive Viewer
 - ⏳ Task 3.2: Settings Dialog
 - ⏳ Task 3.3: GPU Monitoring Widget
-- ⏳ Task 3.4: Batch Operations
+- ❌ Task 3.4: Batch Operations (CUT - deferred to future version)
 - ⏳ Task 3.5: Advanced Progress Tracking
 
 ### 🔄 Phase 4-6: Platform Integration & Polish - NOT STARTED
@@ -462,21 +462,30 @@ Unit tests can be found in /unit_tests, there are a number of .bat/.sh files to 
 
 ---
 
-### Task 3.4: Implement Batch Operations
+### Task 3.4: Implement Batch Operations ❌ CUT
 **Duration:** 1 session  
 **Complexity:** Medium  
-**Dependencies:** Task 2.4
+**Dependencies:** Task 2.4  
+**Status:** ❌ **DEFERRED TO FUTURE VERSION**
 
-**Objective:** Allow compression of multiple files/folders in sequence.
+**Rationale for Cut:**
+- Power users needing bulk operations can script the CLI more effectively
+- Typical GUI users compress files as single operations or bundles
+- Development time better spent on high-impact features (context menus, archive viewer)
+- CLI + Python/Bash scripting provides more flexibility for automation
+- Most successful compression GUIs (7-Zip, etc.) don't have queue systems
+- Feature can be reconsidered for v2.0 based on user demand
 
-**Deliverables:**
+**Original Objective:** Allow compression of multiple files/folders in sequence.
+
+**Deliverables (Deferred):**
 - Queue system for multiple operations
 - Batch progress indicator (file 3 of 10)
 - Option to stop after current file
 - Summary report at completion
 - CSV export of compression statistics
 
-**Success Criteria:**
+**Success Criteria (Deferred):**
 - Can queue multiple compress/decompress operations
 - Operations run sequentially
 - Overall and per-file progress shown
@@ -1462,7 +1471,7 @@ Provide GPU monitoring implementation with CUDA integration.
 
 ---
 
-### **Prompt for Task 3.4: Implement Batch Operations**
+### **Prompt for Task 3.4: Implement Batch Operations** ❌ CUT - DEFERRED
 
 ```
 I need to add batch processing capability to compress/decompress multiple files in sequence.
@@ -2773,14 +2782,14 @@ Provide release checklist, final build scripts, and release announcement templat
 
 ### Time Estimates:
 
-- **Phase 1** (Core Refactoring): 8-10 LLM sessions
-- **Phase 2** (Basic Qt GUI): 8-12 LLM sessions
-- **Phase 3** (Advanced Features): 10-12 LLM sessions (includes Task 3.5 block progress)
+- **Phase 1** (Core Refactoring): 8-10 LLM sessions ✅ COMPLETE
+- **Phase 2** (Basic Qt GUI): 8-12 LLM sessions ✅ COMPLETE
+- **Phase 3** (Advanced Features): 8-10 LLM sessions (Task 3.4 cut, includes Task 3.5 block progress)
 - **Phase 4** (Windows Integration): 6-8 LLM sessions
 - **Phase 5** (Linux Integration): 8-10 LLM sessions
 - **Phase 6** (Polish & Testing): 10-12 LLM sessions
 
-**Total**: ~52-64 LLM sessions over 8-10 weeks
+**Total**: ~48-60 LLM sessions over 8-10 weeks (revised with Task 3.4 cut)
 
 ### Success Metrics:
 
