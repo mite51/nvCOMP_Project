@@ -49,6 +49,16 @@ set(GUI_HEADERS
     src/progress_widget.h
 )
 
+# Platform-specific sources
+if(WIN32)
+    list(APPEND GUI_SOURCES
+        ../platform/windows/context_menu.cpp
+    )
+    list(APPEND GUI_HEADERS
+        ../platform/windows/context_menu.h
+    )
+endif()
+
 set(GUI_UI_FILES
     ui/mainwindow.ui
     ui/archive_viewer.ui
@@ -59,11 +69,19 @@ set(GUI_RESOURCES
     resources/nvcomp.qrc
 )
 
+# Add Windows icon resource AFTER setting GUI_RESOURCES
+if(WIN32)
+    list(APPEND GUI_RESOURCES
+        resources/nvcomp.rc
+    )
+endif()
+
 # ============================================================================
 # Create GUI Executable
 # ============================================================================
 
 add_executable(nvcomp_gui
+    WIN32  # This makes it a Windows GUI app (no console)
     ${GUI_SOURCES}
     ${GUI_HEADERS}
     ${GUI_UI_FILES}
@@ -78,6 +96,7 @@ target_include_directories(nvcomp_gui PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_BINARY_DIR}  # For generated UI headers
     ${CMAKE_SOURCE_DIR}/core/include  # Core library API
+    ${CMAKE_SOURCE_DIR}/platform/windows  # Platform-specific code
 )
 
 # ============================================================================
@@ -91,6 +110,15 @@ target_link_libraries(nvcomp_gui PRIVATE
     nvcomp_core  # Link to our compression core library
     CUDA::cudart  # Link CUDA runtime for GPU monitoring
 )
+
+# Platform-specific libraries
+if(WIN32)
+    target_link_libraries(nvcomp_gui PRIVATE
+        shlwapi  # For SHDeleteKeyW
+        shell32  # For SHChangeNotify
+        advapi32  # For registry operations
+    )
+endif()
 
 # ============================================================================
 # Platform-Specific Configuration
@@ -167,8 +195,8 @@ if(BUILD_TESTS)
     
     enable_testing()
     
-    # Test executable
-    add_executable(test_mainwindow
+    # Test executable sources
+    set(TEST_SOURCES
         tests/test_mainwindow.cpp
         src/mainwindow.cpp  # Include source to test
         src/compression_worker.cpp  # Include worker source
@@ -178,10 +206,20 @@ if(BUILD_TESTS)
         src/progress_widget.cpp  # Include progress widget source
     )
     
+    # Add platform-specific sources for tests
+    if(WIN32)
+        list(APPEND TEST_SOURCES
+            ../platform/windows/context_menu.cpp
+        )
+    endif()
+    
+    add_executable(test_mainwindow ${TEST_SOURCES})
+    
     target_include_directories(test_mainwindow PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_BINARY_DIR}
         ${CMAKE_SOURCE_DIR}/core/include
+        ${CMAKE_SOURCE_DIR}/platform/windows  # Platform-specific includes
     )
     
     target_link_libraries(test_mainwindow PRIVATE
@@ -192,6 +230,15 @@ if(BUILD_TESTS)
         nvcomp_core
         CUDA::cudart  # Link CUDA runtime for GPU monitoring
     )
+    
+    # Platform-specific libraries for tests
+    if(WIN32)
+        target_link_libraries(test_mainwindow PRIVATE
+            shlwapi  # For SHDeleteKeyW
+            shell32  # For SHChangeNotify
+            advapi32  # For registry operations
+        )
+    endif()
     
     # Platform-specific test configuration
     if(WIN32)

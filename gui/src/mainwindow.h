@@ -92,6 +92,29 @@ public:
      * @return Output archive filename (may be empty for auto-generated)
      */
     QString getOutputArchiveName() const;
+    
+    /**
+     * @brief Adds files from command-line arguments
+     * @param files List of file paths to add
+     * 
+     * Used when application is launched from context menu or command line
+     */
+    void addFilesFromCommandLine(const QStringList &files);
+    
+    /**
+     * @brief Sets the algorithm from command-line argument
+     * @param algorithm Algorithm name (lz4, snappy, zstd, etc.)
+     * 
+     * Selects the appropriate algorithm in the combo box
+     */
+    void setAlgorithmFromCommandLine(const QString &algorithm);
+    
+    /**
+     * @brief Starts compression automatically (for context menu)
+     * 
+     * Used when --compress flag is passed on command line
+     */
+    void startCompressionFromCommandLine();
 
 protected:
     /**
@@ -324,6 +347,18 @@ private slots:
      * @param percentFree Percent free VRAM
      */
     void onVRAMLowWarning(int deviceIndex, float percentFree);
+    
+    /**
+     * @brief Handles context menu registration (Windows only)
+     * Registers Windows Explorer context menu integration
+     */
+    void onRegisterContextMenu();
+    
+    /**
+     * @brief Handles context menu unregistration (Windows only)
+     * Removes Windows Explorer context menu integration
+     */
+    void onUnregisterContextMenu();
 };
 
 #endif // MAINWINDOW_H

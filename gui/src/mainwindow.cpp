@@ -30,6 +30,10 @@
 #include <QListWidgetItem>
 #include <QDebug>
 
+#ifdef _WIN32
+#include "../../platform/windows/context_menu.h"
+#endif
+
 // Helper class to keep the file dialog button always enabled
 class ButtonEnabledFilter : public QObject
 {
@@ -180,6 +184,23 @@ void MainWindow::setupConnections()
         
         connect(gpuMonitorAction, &QAction::triggered,
                 this, &MainWindow::onGPUMonitorTriggered);
+        
+#ifdef _WIN32
+        // Add context menu registration options (Windows only)
+        ui->menuTools->addSeparator();
+        
+        QAction *registerContextMenuAction = new QAction("Register Windows Context Menu...", this);
+        registerContextMenuAction->setToolTip("Add nvCOMP to Windows Explorer right-click menu (requires admin)");
+        ui->menuTools->addAction(registerContextMenuAction);
+        connect(registerContextMenuAction, &QAction::triggered,
+                this, &MainWindow::onRegisterContextMenu);
+        
+        QAction *unregisterContextMenuAction = new QAction("Unregister Windows Context Menu...", this);
+        unregisterContextMenuAction->setToolTip("Remove nvCOMP from Windows Explorer right-click menu (requires admin)");
+        ui->menuTools->addAction(unregisterContextMenuAction);
+        connect(unregisterContextMenuAction, &QAction::triggered,
+                this, &MainWindow::onUnregisterContextMenu);
+#endif
     }
     
     // Connect file list double-click
@@ -1143,5 +1164,222 @@ void MainWindow::onVRAMLowWarning(int deviceIndex, float percentFree)
                 .arg(percentFree, 0, 'f', 1));
     }
 }
+
+// ============================================================================
+// Command-line argument handling
+// ============================================================================
+
+void MainWindow::addFilesFromCommandLine(const QStringList &files)
+{
+    // Add files passed via command-line arguments
+    // This is used when the application is launched from context menu
+    if (!files.isEmpty()) {
+        addFiles(files);
+        statusBar()->showMessage(
+            tr("Added %1 file(s) from command line").arg(files.count()), 
+            3000
+        );
+    }
+}
+
+void MainWindow::setAlgorithmFromCommandLine(const QString &algorithm)
+{
+    // Map algorithm string to combo box index
+    // Algorithm names are stored as userData in the combo box items
+    QString algoUpper = algorithm.toUpper();
+    
+    // Try to find the algorithm by userData
+    for (int i = 0; i < ui->comboBoxAlgorithm->count(); ++i) {
+        QString itemAlgo = ui->comboBoxAlgorithm->itemData(i).toString();
+        if (itemAlgo.compare(algorithm, Qt::CaseInsensitive) == 0 ||
+            itemAlgo.compare(algoUpper, Qt::CaseInsensitive) == 0) {
+            ui->comboBoxAlgorithm->setCurrentIndex(i);
+            statusBar()->showMessage(
+                tr("Algorithm set to: %1").arg(itemAlgo), 
+                3000
+            );
+            return;
+        }
+    }
+    
+    // Fallback: try to match by display text
+    for (int i = 0; i < ui->comboBoxAlgorithm->count(); ++i) {
+        QString itemText = ui->comboBoxAlgorithm->itemText(i);
+        if (itemText.startsWith(algorithm, Qt::CaseInsensitive) ||
+            itemText.startsWith(algoUpper, Qt::CaseInsensitive)) {
+            ui->comboBoxAlgorithm->setCurrentIndex(i);
+            statusBar()->showMessage(
+                tr("Algorithm set to: %1").arg(itemText), 
+                3000
+            );
+            return;
+        }
+    }
+    
+    // If not found, show warning
+    QMessageBox::warning(this, tr("Unknown Algorithm"),
+        tr("Could not find algorithm: %1\n\nUsing default algorithm.").arg(algorithm));
+}
+
+void MainWindow::startCompressionFromCommandLine()
+{
+    // Auto-start compression (called after window is shown and event loop is running)
+    // This is used when --compress flag is passed on command line
+    
+    if (m_fileList.isEmpty()) {
+        QMessageBox::warning(this, tr("No Files"),
+            tr("Cannot start compression: no files selected."));
+        return;
+    }
+    
+    // Start compression with current settings
+    onCompressClicked();
+}
+
+// ============================================================================
+// Windows Context Menu Registration (Windows only)
+// ============================================================================
+
+#ifdef _WIN32
+void MainWindow::onRegisterContextMenu()
+{
+    // Check if already registered
+    if (ContextMenuManager::isRegistered()) {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            tr("Context Menu Already Registered"),
+            tr("Windows Explorer context menu is already registered.\n\n"
+               "Do you want to re-register it (will overwrite existing entries)?"),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
+    
+    // Check for admin privileges
+    if (!ContextMenuManager::isRunningAsAdmin()) {
+        QMessageBox::warning(
+            this,
+            tr("Administrator Privileges Required"),
+            tr("Registering Windows Explorer context menu requires administrator privileges.\n\n"
+               "Please restart this application as administrator:\n"
+               "1. Right-click nvcomp-gui.exe\n"
+               "2. Select 'Run as administrator'\n"
+               "3. Try again")
+        );
+        return;
+    }
+    
+    // Get application path
+    QString exePath = QCoreApplication::applicationFilePath();
+    QString iconPath = exePath;  // Use .exe as icon (Windows will extract the embedded icon)
+    
+    // Register
+    bool success = ContextMenuManager::registerContextMenu(exePath, iconPath);
+    
+    if (success) {
+        QMessageBox::information(
+            this,
+            tr("Registration Successful"),
+            tr("Windows Explorer context menu has been registered successfully!\n\n"
+               "You can now right-click files and folders in Windows Explorer\n"
+               "and select 'Compress with nvCOMP' to compress them.\n\n"
+               "Changes will take effect immediately.")
+        );
+        statusBar()->showMessage(tr("Context menu registered successfully"), 5000);
+    } else {
+        QMessageBox::critical(
+            this,
+            tr("Registration Failed"),
+            tr("Failed to register Windows Explorer context menu.\n\n"
+               "Error: %1").arg(ContextMenuManager::getLastError())
+        );
+        statusBar()->showMessage(tr("Context menu registration failed"), 5000);
+    }
+}
+
+void MainWindow::onUnregisterContextMenu()
+{
+    // Check if registered
+    if (!ContextMenuManager::isRegistered()) {
+        QMessageBox::information(
+            this,
+            tr("Not Registered"),
+            tr("Windows Explorer context menu is not currently registered.")
+        );
+        return;
+    }
+    
+    // Confirm unregistration
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this,
+        tr("Confirm Unregistration"),
+        tr("Are you sure you want to remove nvCOMP from Windows Explorer context menu?"),
+        QMessageBox::Yes | QMessageBox::No
+    );
+    
+    if (reply != QMessageBox::Yes) {
+        return;
+    }
+    
+    // Check for admin privileges
+    if (!ContextMenuManager::isRunningAsAdmin()) {
+        QMessageBox::warning(
+            this,
+            tr("Administrator Privileges Required"),
+            tr("Unregistering Windows Explorer context menu requires administrator privileges.\n\n"
+               "Please restart this application as administrator:\n"
+               "1. Right-click nvcomp-gui.exe\n"
+               "2. Select 'Run as administrator'\n"
+               "3. Try again")
+        );
+        return;
+    }
+    
+    // Unregister
+    bool success = ContextMenuManager::unregisterContextMenu();
+    
+    if (success) {
+        QMessageBox::information(
+            this,
+            tr("Unregistration Successful"),
+            tr("Windows Explorer context menu has been removed successfully!\n\n"
+               "Context menu entries will no longer appear when you right-click\n"
+               "files and folders in Windows Explorer.")
+        );
+        statusBar()->showMessage(tr("Context menu unregistered successfully"), 5000);
+    } else {
+        QMessageBox::critical(
+            this,
+            tr("Unregistration Failed"),
+            tr("Failed to unregister Windows Explorer context menu.\n\n"
+               "Error: %1").arg(ContextMenuManager::getLastError())
+        );
+        statusBar()->showMessage(tr("Context menu unregistration failed"), 5000);
+    }
+}
+
+#else
+// Stub implementations for non-Windows platforms
+void MainWindow::onRegisterContextMenu()
+{
+    QMessageBox::information(
+        this,
+        tr("Not Supported"),
+        tr("Context menu registration is only supported on Windows.")
+    );
+}
+
+void MainWindow::onUnregisterContextMenu()
+{
+    QMessageBox::information(
+        this,
+        tr("Not Supported"),
+        tr("Context menu unregistration is only supported on Windows.")
+    );
+}
+#endif
 
 

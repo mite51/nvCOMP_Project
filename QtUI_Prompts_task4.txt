@@ -1,0 +1,163 @@
+=========================================================================
+Task 4.1 
+
+
+<ui plan>
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Task 4.1
+
+## Commit Title
+```
+feat: Add Windows Explorer context menu integration with icons (Task 4.1)
+```
+
+## Commit Body
+```
+Implement Windows Explorer context menu integration for nvCOMP with cascading 
+submenus and application icons. Users can now right-click files and folders 
+to compress them directly from Windows Explorer.
+
+## Features Added:
+
+### Context Menu Integration
+- ContextMenuManager class for Windows registry management
+- Cascading menu with 4 algorithm options (LZ4, Zstd, Snappy, Choose)
+- Context menu for files (HKEY_CLASSES_ROOT\*\shell\nvCOMP)
+- Context menu for folders (HKEY_CLASSES_ROOT\Directory\shell\nvCOMP)
+- Context menu for folder background
+- MUIVerb + SubCommands for proper cascading menu structure
+- GUI-based registration/unregistration tools (Tools menu)
+- Admin privilege checking with user-friendly error messages
+
+### Application Icon
+- Created green placeholder icon (nvcomp.ico) - easily replaceable
+- Windows .rc resource file for icon embedding
+- Icons displayed in: Explorer, taskbar, context menu
+- Multiple sizes: 16x16, 32x32, 48x48, 64x64, 128x128, 256x256
+- Icon index format for registry ("path\to\exe",0)
+
+### Command-Line Interface
+- Full argument parsing (QCommandLineParser)
+- --add-file <path>: Pre-load files in GUI
+- --compress: Enable auto-compress mode
+- --algorithm <algo>: Set compression algorithm
+- --help and --version options
+- Support for positional file arguments
+
+### Platform Files
+- platform/windows/context_menu.h: Registry management header
+- platform/windows/context_menu.cpp: Implementation (~400 lines)
+- platform/windows/*.md: Comprehensive documentation (~2500 lines)
+- gui/resources/create_icon.py: Icon generator script
+- gui/resources/nvcomp.rc: Windows icon resource
+- gui/resources/nvcomp.ico: Application icon
+
+### GUI Enhancements
+- MainWindow::addFilesFromCommandLine(): Pre-load files
+- MainWindow::setAlgorithmFromCommandLine(): Set algorithm
+- MainWindow::startCompressionFromCommandLine(): Auto-start
+- MainWindow::onRegisterContextMenu(): Register menu
+- MainWindow::onUnregisterContextMenu(): Unregister menu
+- Tools menu integration for context menu management
+
+### Build System
+- Updated gui/CMakeLists.txt: Platform-specific sources
+- Added WIN32 flag for proper Windows GUI executable
+- Linked shlwapi, shell32, advapi32 libraries
+- Added platform includes to include directories
+- Fixed resource file ordering to include both .qrc and .rc
+
+## Technical Details:
+
+### Registry Structure
+```
+HKEY_CLASSES_ROOT\*\shell\nvCOMP
+├── MUIVerb = "Compress with nvCOMP"
+├── Icon = "path\to\nvcomp_gui.exe",0
+├── SubCommands = ""
+└── shell\
+    ├── LZ4\command
+    ├── Zstd\command
+    ├── Snappy\command
+    └── Choose\command
+```
+
+### Bug Fixes
+- Fixed QSettings default value: Use "." instead of empty string
+- Fixed GUI_RESOURCES overwrite: .rc was being discarded by .qrc
+- Fixed icon path format: Added ",0" index for proper icon extraction
+- Fixed variable name conflict: iconPath -> iconPathWithIndex
+
+### Cross-Platform Support
+- Conditional compilation (WIN32) for Windows-specific code
+- Linux stubs (no-op) for future compatibility
+- Platform-independent design where possible
+
+## Testing
+- ✅ Context menu appears for files and folders
+- ✅ All 4 submenus functional (LZ4, Zstd, Snappy, Choose)
+- ✅ Icons display correctly in Explorer and context menu
+- ✅ Command-line arguments work as expected
+- ✅ Registration/unregistration tools functional
+- ✅ Admin privilege checking works
+- ✅ Compression from context menu successful
+- ✅ User-verified on Windows 11
+
+## Documentation
+- TASK_4.1_SUMMARY.md: Complete implementation summary
+- TASK_4.1_COMPLETE.md: Achievement documentation
+- platform/windows/README.md: Platform overview
+- platform/windows/QUICK_START.md: Quick reference guide
+- platform/windows/CONTEXT_MENU_TESTING.md: Testing procedures
+- platform/windows/FIX_CONTEXT_MENU.md: Troubleshooting
+- platform/windows/CASCADING_MENU_FIX.md: Technical details
+- platform/windows/WINDOWS11_MODERN_MENU.md: Windows 11 notes
+
+## Windows 11 Note
+Context menu appears in legacy menu ("Show more options" or Shift+Right-click).
+Windows 11 modern menu requires COM shell extension (future enhancement).
+Users can enable legacy menu by default via registry tweak (documented).
+
+## File Statistics
+- New Files: 12 (2 source, 1 script, 1 resource, 8 documentation)
+- Modified Files: 5
+- New Code: ~1,000 lines
+- Documentation: ~2,500 lines
+- Total: ~3,500 lines
+
+## Tested On
+- Windows 11 Pro (verified by user)
+- Visual Studio 2022 MSVC compiler
+- Qt 6.8.0
+- CMake 3.18+
+
+## Related Tasks
+- Task 4.1: ✅ Complete (this commit)
+- Task 4.2: Windows File Associations (next)
+- Task 4.3: Windows Installer (WiX)
+
+## Breaking Changes
+None - all changes are additive.
+
+## Migration Notes
+- No user action required
+- Context menu must be registered manually (Tools menu)
+- Requires administrator privileges for registration
+
+=========================================================================
+Task 4.2 
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+=========================================================================
