@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  components.wxs - Component definitions for nvCOMP installer
+  
+  This file defines all file components, registry entries, and shortcuts.
+  Each component must have a unique GUID that remains stable across versions.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  
+  <?include product.wxi ?>
+  
+  <Fragment>
+    
+    <!-- Core DLL components -->
+    <ComponentGroup Id="CoreComponents" Directory="INSTALLDIR">
+      
+      <!-- nvcomp_core.dll - Our core compression library -->
+      <Component Id="CoreDll" Guid="$(var.CoreDllComponentGuid)" Win64="yes">
+        <File Id="nvcomp_core.dll"
+              Name="nvcomp_core.dll"
+              Source="$(var.SourceDir)\nvcomp_core.dll"
+              KeyPath="yes" />
+      </Component>
+      
+    </ComponentGroup>
+    
+    <!-- NVIDIA nvCOMP SDK dependencies -->
+    <ComponentGroup Id="NvCompDependencies" Directory="INSTALLDIR">
+      
+      <!-- nvcomp64_5.dll - NVIDIA GPU compression library -->
+      <Component Id="NvComp64Dll" Guid="$(var.NvCompDllComponentGuid)" Win64="yes">
+        <File Id="nvcomp64_5.dll"
+              Name="nvcomp64_5.dll"
+              Source="$(var.SourceDir)\nvcomp64_5.dll"
+              KeyPath="yes" />
+      </Component>
+      
+      <!-- nvcomp_cpu64_5.dll - NVIDIA CPU fallback library -->
+      <Component Id="NvCompCpu64Dll" Guid="$(var.NvCompCpuDllComponentGuid)" Win64="yes">
+        <File Id="nvcomp_cpu64_5.dll"
+              Name="nvcomp_cpu64_5.dll"
+              Source="$(var.SourceDir)\nvcomp_cpu64_5.dll"
+              KeyPath="yes" />
+      </Component>
+      
+    </ComponentGroup>
+    
+    <!-- GUI application components -->
+    <ComponentGroup Id="GuiComponents" Directory="INSTALLDIR">
+      
+      <!-- nvcomp_gui.exe - Main GUI application -->
+      <Component Id="GuiExe" Guid="$(var.GuiExeComponentGuid)" Win64="yes">
+        <File Id="nvcomp_gui.exe"
+              Name="nvcomp_gui.exe"
+              Source="$(var.SourceDir)\nvcomp_gui.exe"
+              KeyPath="yes" />
+        
+        <!-- Add to PATH (optional, for command-line access) -->
+        <Environment Id="PATH"
+                     Name="PATH"
+                     Value="[INSTALLDIR]"
+                     Permanent="no"
+                     Part="last"
+                     Action="set"
+                     System="yes" />
+        
+        <!-- Registry entry for installation path (used by updater) -->
+        <RegistryKey Root="HKLM" Key="$(var.RegPathProduct)">
+          <RegistryValue Type="string" Name="InstallPath" Value="[INSTALLDIR]" KeyPath="no" />
+          <RegistryValue Type="string" Name="Version" Value="$(var.ProductVersion)" KeyPath="no" />
+          <RegistryValue Type="string" Name="GuiExePath" Value="[INSTALLDIR]nvcomp_gui.exe" KeyPath="no" />
+        </RegistryKey>
+        
+      </Component>
+      
+    </ComponentGroup>
+    
+    <!-- Qt 6 dependencies -->
+    <ComponentGroup Id="Qt6Dependencies" Directory="INSTALLDIR">
+      
+      <!-- Qt6Core.dll -->
+      <Component Id="Qt6Core" Guid="*" Win64="yes">
+        <File Id="Qt6Core.dll" Source="$(var.SourceDir)\Qt6Core.dll" />
+      </Component>
+      
+      <!-- Qt6Gui.dll -->
+      <Component Id="Qt6Gui" Guid="*" Win64="yes">
+        <File Id="Qt6Gui.dll" Source="$(var.SourceDir)\Qt6Gui.dll" />
+      </Component>
+      
+      <!-- Qt6Widgets.dll -->
+      <Component Id="Qt6Widgets" Guid="*" Win64="yes">
+        <File Id="Qt6Widgets.dll" Source="$(var.SourceDir)\Qt6Widgets.dll" />
+      </Component>
+      
+    </ComponentGroup>
+    
+    <!-- Qt plugins - separate ComponentGroups for different directories -->
+    <ComponentGroup Id="Qt6PluginsPlatforms">
+      <Component Id="QtPluginsPlatforms" Guid="*" Win64="yes" Directory="QtPluginsPlatformsDir">
+        <File Id="qwindows.dll" Source="$(var.SourceDir)\platforms\qwindows.dll" />
+      </Component>
+    </ComponentGroup>
+    
+    <ComponentGroup Id="Qt6PluginsStyles">
+      <Component Id="QtPluginsStyles" Guid="*" Win64="yes" Directory="QtPluginsStylesDir">
+        <File Id="qmodernwindowsstyle.dll" Source="$(var.SourceDir)\styles\qmodernwindowsstyle.dll" />
+      </Component>
+    </ComponentGroup>
+    
+    <ComponentGroup Id="Qt6PluginsImageFormats">
+      <Component Id="QtPluginQico" Guid="*" Win64="yes" Directory="QtPluginsImageFormatsDir">
+        <File Id="qico.dll" Source="$(var.SourceDir)\imageformats\qico.dll" />
+      </Component>
+      <Component Id="QtPluginQjpeg" Guid="*" Win64="yes" Directory="QtPluginsImageFormatsDir">
+        <File Id="qjpeg.dll" Source="$(var.SourceDir)\imageformats\qjpeg.dll" />
+      </Component>
+      <!-- qpng.dll not deployed by windeployqt in this build -->
+    </ComponentGroup>
+    
+    <!-- CLI application components -->
+    <ComponentGroup Id="CliComponents" Directory="INSTALLDIR">
+      
+      <!-- nvcomp-cli.exe - Command-line tool (optional - may not exist) -->
+      <!-- Commented out since CLI isn't built in GUI-only builds -->
+      <!--
+      <Component Id="CliExe" Guid="$(var.CliExeComponentGuid)" Win64="yes">
+        <File Id="nvcomp_cli.exe"
+              Name="nvcomp-cli.exe"
+              Source="$(var.SourceDir)\nvcomp-cli.exe"
+              KeyPath="yes" />
+        
+        <RegistryKey Root="HKLM" Key="$(var.RegPathProduct)">
+          <RegistryValue Type="string" Name="CliExePath" Value="[INSTALLDIR]nvcomp-cli.exe" KeyPath="no" />
+        </RegistryKey>
+        
+      </Component>
+      -->
+      
+    </ComponentGroup>
+    
+    <!-- Start Menu shortcuts -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcuts" Guid="*">
+        
+        <!-- Main application shortcut -->
+        <Shortcut Id="GuiStartMenuShortcut"
+                  Name="nvCOMP"
+                  Description="NVIDIA CUDA Compression Tools"
+                  Target="[INSTALLDIR]nvcomp_gui.exe"
+                  WorkingDirectory="INSTALLDIR" />
+        
+        <!-- Uninstall shortcut -->
+        <Shortcut Id="UninstallShortcut"
+                  Name="Uninstall nvCOMP"
+                  Description="Uninstalls nvCOMP"
+                  Target="[SystemFolder]msiexec.exe"
+                  Arguments="/x [ProductCode]" />
+        
+        <!-- Cleanup: Remove Start Menu folder on uninstall -->
+        <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+        
+        <!-- Registry key to track the component -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\$(var.CompanyFolder)\$(var.ProductFolder)"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+        
+      </Component>
+    </DirectoryRef>
+    
+    <!-- Desktop shortcut -->
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*">
+        
+        <Shortcut Id="GuiDesktopShortcut"
+                  Name="nvCOMP"
+                  Description="NVIDIA CUDA Compression Tools"
+                  Target="[INSTALLDIR]nvcomp_gui.exe"
+                  WorkingDirectory="INSTALLDIR" />
+        
+        <!-- Registry key to track the component -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\$(var.CompanyFolder)\$(var.ProductFolder)"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+        
+      </Component>
+    </DirectoryRef>
+    
+  </Fragment>
+  
+  <!-- Additional directory structure for Qt plugins -->
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      
+      <!-- platforms plugin directory -->
+      <Directory Id="QtPluginsPlatformsDir" Name="platforms" />
+      
+      <!-- styles plugin directory -->
+      <Directory Id="QtPluginsStylesDir" Name="styles" />
+      
+      <!-- imageformats plugin directory -->
+      <Directory Id="QtPluginsImageFormatsDir" Name="imageformats" />
+      
+    </DirectoryRef>
+  </Fragment>
+  
+</Wix>
+

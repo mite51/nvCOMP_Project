@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  installer.wxs - Main WiX installer definition for nvCOMP
+  
+  This file defines the product, features, and installation logic.
+  
+  Build commands:
+    candle.exe installer.wxs components.wxs ui.wxs -ext WixUIExtension
+    light.exe installer.wixobj components.wixobj ui.wixobj -ext WixUIExtension -out nvCOMP-4.0.0-x64.msi
+  
+  Or use build_installer.bat for automated building.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  
+  <?include product.wxi ?>
+  
+  <Product Id="*"
+           Name="$(var.ProductName) $(var.ProductVersion)"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="$(var.ProductManufacturer)"
+           UpgradeCode="$(var.UpgradeCode)">
+    
+    <!-- Package information -->
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="$(var.ProductDescription)"
+             Comments="CUDA-accelerated compression and decompression tools"
+             Manufacturer="$(var.ProductManufacturer)" />
+    
+    <!-- Require Windows 10 or later -->
+    <Condition Message="This application requires Windows 10 (build 17763) or later.">
+      <![CDATA[Installed OR (VersionNT >= 603)]]>
+    </Condition>
+    
+    <!-- Require x64 architecture -->
+    <Condition Message="This application requires 64-bit Windows.">
+      <![CDATA[VersionNT64]]>
+    </Condition>
+    
+    <!-- Media: single CAB file embedded in MSI -->
+    <MediaTemplate EmbedCab="yes" />
+    
+    <!-- Application icon shown in Add/Remove Programs -->
+    <!-- TODO: Convert PNG icons to ICO format -->
+    <!-- <Icon Id="ProductIcon" SourceFile="nvcomp.ico" /> -->
+    <!-- <Property Id="ARPPRODUCTICON" Value="ProductIcon" /> -->
+    
+    <!-- Add/Remove Programs properties -->
+    <Property Id="ARPHELPLINK" Value="$(var.HelpUrl)" />
+    <Property Id="ARPURLINFOABOUT" Value="$(var.AboutUrl)" />
+    <Property Id="ARPURLUPDATEINFO" Value="$(var.SupportUrl)" />
+    <Property Id="ARPNOREPAIR" Value="yes" />
+    <Property Id="ARPNOMODIFY" Value="yes" />
+    <Property Id="ARPSIZE" Value="$(var.EstimatedSizeKB)" />
+    
+    <!-- Major upgrade logic: uninstall old version, install new -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed. Please uninstall it first."
+      Schedule="afterInstallInitialize"
+      AllowDowngrades="no"
+      AllowSameVersionUpgrades="no" />
+    
+    <!--
+      Custom properties for installation options
+      These can be set via command line: msiexec /i installer.msi INSTALL_CLI=0
+    -->
+    <Property Id="INSTALL_GUI" Value="1" />
+    <Property Id="INSTALL_CLI" Value="1" />
+    <Property Id="INSTALL_CONTEXT_MENU" Value="1" />
+    <Property Id="INSTALL_FILE_ASSOCIATIONS" Value="1" />
+    <Property Id="INSTALL_START_MENU_SHORTCUTS" Value="1" />
+    <Property Id="INSTALL_DESKTOP_SHORTCUT" Value="0" />
+    
+    <!-- Check for prerequisites -->
+    
+    <!-- Visual C++ Redistributable 2019-2022 (14.30+) -->
+    <Property Id="VCREDIST_INSTALLED">
+      <RegistrySearch Id="VCRedist2022_x64"
+                      Root="HKLM"
+                      Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+                      Name="Version"
+                      Type="raw" />
+    </Property>
+    
+    <!-- CUDA Toolkit (optional - warn if not present, don't block) -->
+    <Property Id="CUDA_INSTALLED">
+      <RegistrySearch Id="CUDA_Toolkit"
+                      Root="HKLM"
+                      Key="SOFTWARE\NVIDIA Corporation\GPU Computing Toolkit\CUDA"
+                      Name="Version"
+                      Type="raw" />
+    </Property>
+    
+    <!-- Custom actions for context menu and file associations -->
+    
+    <!-- Register context menu (deferred, requires elevation) -->
+    <CustomAction Id="RegisterContextMenu"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+    
+    <CustomAction Id="SetRegisterContextMenuCmd"
+                  Property="RegisterContextMenu"
+                  Value="&quot;[INSTALLDIR]nvcomp_gui.exe&quot; --register-context-menu" />
+    
+    <!-- Unregister context menu (deferred, requires elevation) -->
+    <CustomAction Id="UnregisterContextMenu"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+    
+    <CustomAction Id="SetUnregisterContextMenuCmd"
+                  Property="UnregisterContextMenu"
+                  Value="&quot;[INSTALLDIR]nvcomp_gui.exe&quot; --unregister-context-menu" />
+    
+    <!-- Register file associations (deferred, requires elevation) -->
+    <CustomAction Id="RegisterFileAssociations"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+    
+    <CustomAction Id="SetRegisterFileAssociationsCmd"
+                  Property="RegisterFileAssociations"
+                  Value="&quot;[INSTALLDIR]nvcomp_gui.exe&quot; --register-file-associations" />
+    
+    <!-- Unregister file associations (deferred, requires elevation) -->
+    <CustomAction Id="UnregisterFileAssociations"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+    
+    <CustomAction Id="SetUnregisterFileAssociationsCmd"
+                  Property="UnregisterFileAssociations"
+                  Value="&quot;[INSTALLDIR]nvcomp_gui.exe&quot; --unregister-file-associations" />
+    
+    <!-- Installation sequence -->
+    <InstallExecuteSequence>
+      <!-- Check for VCRedist -->
+      <Custom Action="CheckVCRedist" Before="LaunchConditions">
+        NOT Installed AND NOT VCREDIST_INSTALLED
+      </Custom>
+      
+      <!-- Set command properties before deferred actions -->
+      <Custom Action="SetRegisterContextMenuCmd" Before="RegisterContextMenu">
+        INSTALL_CONTEXT_MENU = 1 AND NOT Installed
+      </Custom>
+      
+      <Custom Action="SetRegisterFileAssociationsCmd" Before="RegisterFileAssociations">
+        INSTALL_FILE_ASSOCIATIONS = 1 AND NOT Installed
+      </Custom>
+      
+      <Custom Action="SetUnregisterContextMenuCmd" Before="UnregisterContextMenu">
+        REMOVE="ALL"
+      </Custom>
+      
+      <Custom Action="SetUnregisterFileAssociationsCmd" Before="UnregisterFileAssociations">
+        REMOVE="ALL"
+      </Custom>
+      
+      <!-- Execute registration after files are installed -->
+      <Custom Action="RegisterContextMenu" After="InstallFiles">
+        INSTALL_CONTEXT_MENU = 1 AND NOT Installed
+      </Custom>
+      
+      <Custom Action="RegisterFileAssociations" After="RegisterContextMenu">
+        INSTALL_FILE_ASSOCIATIONS = 1 AND NOT Installed
+      </Custom>
+      
+      <!-- Execute unregistration before files are removed -->
+      <Custom Action="UnregisterContextMenu" Before="RemoveFiles">
+        REMOVE="ALL"
+      </Custom>
+      
+      <Custom Action="UnregisterFileAssociations" Before="UnregisterContextMenu">
+        REMOVE="ALL"
+      </Custom>
+    </InstallExecuteSequence>
+    
+    <!-- Custom action to check for VCRedist and offer download -->
+    <CustomAction Id="CheckVCRedist"
+                  Error="This application requires the Microsoft Visual C++ 2019-2022 Redistributable (x64). Please download and install it from: https://aka.ms/vs/17/release/vc_redist.x64.exe" />
+    
+    <!-- Launch application after installation (checkbox in finish dialog) -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch nvCOMP GUI" />
+    <Property Id="WixShellExecTarget" Value="[#nvcomp_gui.exe]" />
+    
+    <CustomAction Id="LaunchApplication"
+                  BinaryKey="WixCA"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes" />
+    
+    <!-- Directory structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      
+      <!-- Program Files directory -->
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="CompanyFolder" Name="$(var.CompanyFolder)">
+          <Directory Id="INSTALLDIR" Name="$(var.ProductFolder)">
+            
+            <!-- Main installation directory -->
+            <!-- Components defined in components.wxs -->
+            
+          </Directory>
+        </Directory>
+      </Directory>
+      
+      <!-- Start Menu -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="$(var.ProductName)" />
+      </Directory>
+      
+      <!-- Desktop -->
+      <Directory Id="DesktopFolder" Name="Desktop" />
+      
+    </Directory>
+    
+    <!-- Features (user-selectable components) -->
+    
+    <!-- Main feature (required) -->
+    <Feature Id="ProductFeature"
+             Title="nvCOMP GUI"
+             Level="1"
+             ConfigurableDirectory="INSTALLDIR"
+             Description="Main application with graphical user interface."
+             Display="expand"
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <!-- Core components (always installed with GUI) -->
+      <ComponentGroupRef Id="CoreComponents" />
+      <ComponentGroupRef Id="GuiComponents" />
+      <ComponentGroupRef Id="Qt6Dependencies" />
+      <ComponentGroupRef Id="Qt6PluginsPlatforms" />
+      <ComponentGroupRef Id="Qt6PluginsStyles" />
+      <ComponentGroupRef Id="Qt6PluginsImageFormats" />
+      <ComponentGroupRef Id="NvCompDependencies" />
+      
+    </Feature>
+    
+    <!-- CLI tool (optional) -->
+    <Feature Id="CliFeature"
+             Title="Command Line Tools"
+             Level="1"
+             Description="Command-line interface for scripting and automation."
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <ComponentGroupRef Id="CliComponents" />
+      
+    </Feature>
+    
+    <!-- Context menu integration (optional) -->
+    <Feature Id="ContextMenuFeature"
+             Title="Windows Explorer Context Menu"
+             Level="1"
+             Description="Add 'Compress with nvCOMP' to right-click menu in Windows Explorer."
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <Condition Level="0">INSTALL_CONTEXT_MENU = 0</Condition>
+      
+    </Feature>
+    
+    <!-- File associations (optional) -->
+    <Feature Id="FileAssociationFeature"
+             Title="File Associations"
+             Level="1"
+             Description="Associate .lz4, .zstd, .nvcomp, and other compressed file types with nvCOMP."
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <Condition Level="0">INSTALL_FILE_ASSOCIATIONS = 0</Condition>
+      
+    </Feature>
+    
+    <!-- Start Menu shortcuts (optional) -->
+    <Feature Id="StartMenuFeature"
+             Title="Start Menu Shortcuts"
+             Level="1"
+             Description="Add shortcuts to Start Menu."
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <ComponentRef Id="StartMenuShortcuts" />
+      <Condition Level="0">INSTALL_START_MENU_SHORTCUTS = 0</Condition>
+      
+    </Feature>
+    
+    <!-- Desktop shortcut (optional, off by default) -->
+    <Feature Id="DesktopShortcutFeature"
+             Title="Desktop Shortcut"
+             Level="2"
+             Description="Add shortcut to Desktop."
+             AllowAdvertise="no"
+             InstallDefault="local">
+      
+      <ComponentRef Id="DesktopShortcut" />
+      <Condition Level="0">INSTALL_DESKTOP_SHORTCUT = 0</Condition>
+      
+    </Feature>
+    
+    <!-- Custom UI from ui.wxs -->
+    <UIRef Id="CustomUI" />
+    
+    <!-- Include WixUIExtension for standard dialogs -->
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
+    
+  </Product>
+</Wix>
+

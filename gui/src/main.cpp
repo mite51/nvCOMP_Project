@@ -6,10 +6,14 @@
  * Provides drag-and-drop compression/decompression with GPU acceleration.
  * 
  * Command-line arguments:
- *   --add-file <path>          Add file/folder to GUI and open (for context menu)
- *   --compress                 Enable compress mode (requires --algorithm)
- *   --algorithm <algo>         Set algorithm: lz4, snappy, zstd, gdeflate, ans, bitcomp
- *   --help                     Show help message
+ *   --add-file <path>                Add file/folder to GUI and open (for context menu)
+ *   --compress                       Enable compress mode (requires --algorithm)
+ *   --algorithm <algo>               Set algorithm: lz4, snappy, zstd, gdeflate, ans, bitcomp
+ *   --register-context-menu          Register Windows Explorer context menu (admin required)
+ *   --unregister-context-menu        Unregister Windows Explorer context menu (admin required)
+ *   --register-file-associations     Register file associations (admin required)
+ *   --unregister-file-associations   Unregister file associations (admin required)
+ *   --help                           Show help message
  */
 
 #include <QApplication>
@@ -20,7 +24,14 @@
 #include <QStringList>
 #include <QFileInfo>
 #include <QTimer>
+#include <QCoreApplication>
+#include <iostream>
 #include "mainwindow.h"
+
+#ifdef _WIN32
+#include "../../platform/windows/context_menu.h"
+#include "../../platform/windows/file_associations.h"
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -58,6 +69,22 @@ int main(int argc, char *argv[])
     QCommandLineOption algorithmOption(QStringList() << "algorithm" << "alg",
         "Compression algorithm: lz4, snappy, zstd, gdeflate, ans, bitcomp", "algorithm");
     parser.addOption(algorithmOption);
+    
+    QCommandLineOption registerContextMenuOption("register-context-menu",
+        "Register Windows Explorer context menu (requires administrator privileges)");
+    parser.addOption(registerContextMenuOption);
+    
+    QCommandLineOption unregisterContextMenuOption("unregister-context-menu",
+        "Unregister Windows Explorer context menu (requires administrator privileges)");
+    parser.addOption(unregisterContextMenuOption);
+    
+    QCommandLineOption registerFileAssocOption("register-file-associations",
+        "Register file associations for nvCOMP archive types (requires administrator privileges)");
+    parser.addOption(registerFileAssocOption);
+    
+    QCommandLineOption unregisterFileAssocOption("unregister-file-associations",
+        "Unregister file associations for nvCOMP archive types (requires administrator privileges)");
+    parser.addOption(unregisterFileAssocOption);
     
     // Process arguments
     parser.process(app);
@@ -121,6 +148,171 @@ int main(int argc, char *argv[])
             autoCompress = false;
         }
     }
+    
+    // ========================================================================
+    // Handle registration/unregistration commands (no GUI required)
+    // ========================================================================
+    
+#ifdef _WIN32
+    // These operations run without showing the GUI and exit immediately
+    
+    if (parser.isSet(registerContextMenuOption)) {
+        std::cout << "Registering Windows Explorer context menu..." << std::endl;
+        
+        // Check for admin privileges
+        if (!ContextMenuManager::isRunningAsAdmin()) {
+            std::cerr << "ERROR: Administrator privileges required." << std::endl;
+            std::cerr << "Please run this command as administrator:" << std::endl;
+            std::cerr << "  1. Right-click nvcomp-gui.exe" << std::endl;
+            std::cerr << "  2. Select 'Run as administrator'" << std::endl;
+            std::cerr << "  3. Run the command again" << std::endl;
+            return 1;
+        }
+        
+        // Get application path
+        QString exePath = QCoreApplication::applicationFilePath();
+        
+        // Register
+        bool success = ContextMenuManager::registerContextMenu(exePath, exePath);
+        
+        if (success) {
+            std::cout << "SUCCESS: Windows Explorer context menu registered." << std::endl;
+            std::cout << "You can now right-click files/folders in Windows Explorer" << std::endl;
+            std::cout << "and select 'Compress with nvCOMP'." << std::endl;
+            return 0;
+        } else {
+            std::cerr << "ERROR: Failed to register context menu." << std::endl;
+            std::cerr << "Details: " << ContextMenuManager::getLastError().toStdString() << std::endl;
+            return 1;
+        }
+    }
+    
+    if (parser.isSet(unregisterContextMenuOption)) {
+        std::cout << "Unregistering Windows Explorer context menu..." << std::endl;
+        
+        // Check if registered
+        if (!ContextMenuManager::isRegistered()) {
+            std::cout << "Context menu is not currently registered." << std::endl;
+            return 0;
+        }
+        
+        // Check for admin privileges
+        if (!ContextMenuManager::isRunningAsAdmin()) {
+            std::cerr << "ERROR: Administrator privileges required." << std::endl;
+            std::cerr << "Please run this command as administrator:" << std::endl;
+            std::cerr << "  1. Right-click nvcomp-gui.exe" << std::endl;
+            std::cerr << "  2. Select 'Run as administrator'" << std::endl;
+            std::cerr << "  3. Run the command again" << std::endl;
+            return 1;
+        }
+        
+        // Unregister
+        bool success = ContextMenuManager::unregisterContextMenu();
+        
+        if (success) {
+            std::cout << "SUCCESS: Windows Explorer context menu unregistered." << std::endl;
+            return 0;
+        } else {
+            std::cerr << "ERROR: Failed to unregister context menu." << std::endl;
+            std::cerr << "Details: " << ContextMenuManager::getLastError().toStdString() << std::endl;
+            return 1;
+        }
+    }
+    
+    if (parser.isSet(registerFileAssocOption)) {
+        std::cout << "Registering file associations..." << std::endl;
+        
+        // Check for admin privileges
+        if (!FileAssociationManager::isRunningAsAdmin()) {
+            std::cerr << "ERROR: Administrator privileges required." << std::endl;
+            std::cerr << "Please run this command as administrator:" << std::endl;
+            std::cerr << "  1. Right-click nvcomp-gui.exe" << std::endl;
+            std::cerr << "  2. Select 'Run as administrator'" << std::endl;
+            std::cerr << "  3. Run the command again" << std::endl;
+            return 1;
+        }
+        
+        // Get application path
+        QString exePath = QCoreApplication::applicationFilePath();
+        
+        // Show what will be registered
+        QList<FileTypeInfo> fileTypes = FileAssociationManager::getSupportedFileTypes();
+        std::cout << "File types to register:" << std::endl;
+        for (const FileTypeInfo &ft : fileTypes) {
+            std::cout << "  - " << ft.extension.toStdString() 
+                      << " (" << ft.description.toStdString() << ")" << std::endl;
+        }
+        std::cout << std::endl;
+        
+        // Register
+        bool success = FileAssociationManager::registerAllAssociations(exePath);
+        
+        if (success) {
+            std::cout << "SUCCESS: File associations registered." << std::endl;
+            std::cout << "Changes will take effect immediately." << std::endl;
+            std::cout << "Features added:" << std::endl;
+            std::cout << "  - Double-click compressed files to open in nvCOMP" << std::endl;
+            std::cout << "  - Custom icons for each compression algorithm" << std::endl;
+            std::cout << "  - Right-click menu: 'Extract here' and 'Extract to folder'" << std::endl;
+            return 0;
+        } else {
+            std::cerr << "ERROR: Failed to register file associations." << std::endl;
+            std::cerr << "Details: " << FileAssociationManager::getLastError().toStdString() << std::endl;
+            return 1;
+        }
+    }
+    
+    if (parser.isSet(unregisterFileAssocOption)) {
+        std::cout << "Unregistering file associations..." << std::endl;
+        
+        // Check if any are registered
+        QList<FileTypeInfo> fileTypes = FileAssociationManager::getSupportedFileTypes();
+        bool anyRegistered = false;
+        for (const FileTypeInfo &ft : fileTypes) {
+            if (FileAssociationManager::isAssociated(ft.extension)) {
+                anyRegistered = true;
+                break;
+            }
+        }
+        
+        if (!anyRegistered) {
+            std::cout << "No file associations are currently registered." << std::endl;
+            return 0;
+        }
+        
+        // Check for admin privileges
+        if (!FileAssociationManager::isRunningAsAdmin()) {
+            std::cerr << "ERROR: Administrator privileges required." << std::endl;
+            std::cerr << "Please run this command as administrator:" << std::endl;
+            std::cerr << "  1. Right-click nvcomp-gui.exe" << std::endl;
+            std::cerr << "  2. Select 'Run as administrator'" << std::endl;
+            std::cerr << "  3. Run the command again" << std::endl;
+            return 1;
+        }
+        
+        // Unregister
+        bool success = FileAssociationManager::unregisterAllAssociations();
+        
+        if (success) {
+            std::cout << "SUCCESS: File associations unregistered." << std::endl;
+            std::cout << "nvCOMP is no longer associated with compressed file types." << std::endl;
+            return 0;
+        } else {
+            std::cerr << "ERROR: Failed to unregister file associations." << std::endl;
+            std::cerr << "Details: " << FileAssociationManager::getLastError().toStdString() << std::endl;
+            return 1;
+        }
+    }
+#else
+    // Non-Windows platforms
+    if (parser.isSet(registerContextMenuOption) || 
+        parser.isSet(unregisterContextMenuOption) ||
+        parser.isSet(registerFileAssocOption) || 
+        parser.isSet(unregisterFileAssocOption)) {
+        std::cerr << "ERROR: Context menu and file association registration is only supported on Windows." << std::endl;
+        return 1;
+    }
+#endif
     
     // ========================================================================
     // Create and show main window

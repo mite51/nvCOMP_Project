@@ -2,7 +2,7 @@
 
 ## Progress Status
 
-**Last Updated:** December 15, 2024
+**Last Updated:** December 17, 2024
 
 ### ✅ Phase 1: Core Refactoring - COMPLETE
 - ✅ Task 1.1: Core Library Extraction (27/27 tests passing)
@@ -25,8 +25,8 @@
 
 ### 🔄 Phase 4: Windows Integration - IN PROGRESS
 - ✅ Task 4.1: Windows Context Menu Integration (COMPLETE)
-- ⏳ Task 4.2: Windows File Associations
-- ⏳ Task 4.3: Windows Installer (WiX)
+- ⏳ Task 4.2: Windows File Associations (PLANNED)
+- ✅ Task 4.3: Windows Installer (WiX) (COMPLETE)
 
 ### 🔄 Phase 5-6: Linux Integration & Polish - NOT STARTED
 - Phase 5: Linux Integration

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  product.wxi - Shared product properties for nvCOMP installer
+  
+  This file contains version numbers, GUIDs, and common properties
+  that are shared across all WiX installer files.
+-->
+<Include>
+  <?define ProductName = "nvCOMP" ?>
+  <?define ProductVersion = "4.0.0" ?>
+  <?define ProductManufacturer = "nvCOMP Project" ?>
+  <?define ProductDescription = "NVIDIA CUDA Compression Tools" ?>
+  
+  <!-- 
+    IMPORTANT: Generate new GUIDs for your installation
+    Use: powershell -Command "[guid]::NewGuid()"
+    
+    UpgradeCode should NEVER change (identifies the product across versions)
+    ProductCode should change for each version (identifies specific version)
+  -->
+  <?define UpgradeCode = "12345678-1234-1234-1234-123456789ABC" ?>
+  
+  <!-- Product code will be generated automatically for each build -->
+  
+  <!-- Installation directories -->
+  <?define CompanyFolder = "nvCOMP" ?>
+  <?define ProductFolder = "nvCOMP" ?>
+  
+  <!-- Component GUIDs (generate unique ones) -->
+  <?define GuiExeComponentGuid = "A1B2C3D4-E5F6-4789-A012-345678901234" ?>
+  <?define CliExeComponentGuid = "B2C3D4E5-F6A7-5890-B123-456789012345" ?>
+  <?define CoreDllComponentGuid = "C3D4E5F6-A7B8-6901-C234-567890123456" ?>
+  <?define NvCompDllComponentGuid = "D4E5F6A7-B8C9-7012-D345-678901234567" ?>
+  <?define NvCompCpuDllComponentGuid = "E5F6A7B8-C9D0-8123-E456-789012345678" ?>
+  
+  <!-- Feature GUIDs -->
+  <?define FeatureGuiGuid = "F6A7B8C9-D0E1-9234-F567-890123456789" ?>
+  <?define FeatureCliGuid = "A7B8C9D0-E1F2-0345-A678-901234567890" ?>
+  <?define FeatureContextMenuGuid = "B8C9D0E1-F2A3-1456-B789-012345678901" ?>
+  <?define FeatureFileAssocGuid = "C9D0E1F2-A3B4-2567-C890-123456789012" ?>
+  
+  <!-- Registry paths -->
+  <?define RegPathUninstall = "Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.ProductName)" ?>
+  <?define RegPathProduct = "Software\$(var.CompanyFolder)\$(var.ProductFolder)" ?>
+  
+  <!-- Help URLs -->
+  <?define HelpUrl = "https://github.com/nvcomp/nvcomp" ?>
+  <?define SupportUrl = "https://github.com/nvcomp/nvcomp/issues" ?>
+  <?define AboutUrl = "https://developer.nvidia.com/nvcomp" ?>
+  
+  <!-- Minimum Windows version: Windows 10 (version 1809 / build 17763) -->
+  <?define MinWindowsVersion = "10.0.17763" ?>
+  
+  <!-- Build configuration -->
+  <?define BuildConfiguration = "Release" ?>
+  
+  <!-- Source directories (relative to installer.wxs location) -->
+  <?define SourceDir = "..\..\..\build_gui\gui\Release" ?>
+  <?define ResourceDir = "..\..\gui\resources" ?>
+  <?define LicenseDir = "..\..\.." ?>
+  
+  <!-- File sizes (approximate, in KB) -->
+  <?define EstimatedSizeKB = "153600" ?> <!-- ~150 MB total -->
+</Include>
+

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ui.wxs - Custom UI configuration for nvCOMP installer
+  
+  Uses the standard WixUI_FeatureTree with custom branding.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  
+  <Fragment>
+    
+    <UI Id="CustomUI">
+      
+      <!-- Use the standard feature tree UI -->
+      <!-- This provides welcome, license, feature selection, and progress dialogs -->
+      <UIRef Id="WixUI_FeatureTree" />
+      
+      <!-- Progress messages for custom actions -->
+      <ProgressText Action="RegisterContextMenu">Registering Windows Explorer context menu...</ProgressText>
+      <ProgressText Action="RegisterFileAssociations">Registering file associations...</ProgressText>
+      <ProgressText Action="UnregisterContextMenu">Unregistering context menu...</ProgressText>
+      <ProgressText Action="UnregisterFileAssociations">Unregistering file associations...</ProgressText>
+      
+    </UI>
+    
+  </Fragment>
+  
+</Wix>
+

@@ -309,6 +309,52 @@ The Qt graphical interface provides an intuitive way to compress and decompress 
 - Clear error messages and success notifications
 - Supports all CLI features (multi-volume, CPU fallback, etc.)
 
+## Platform Integration
+
+### Windows Integration
+
+#### Context Menu
+- **Context Menu**: Right-click files/folders in Windows Explorer → "Compress with nvCOMP"
+  - Submenu with algorithm choices (LZ4, Zstd, Snappy)
+  - "Choose algorithm..." option for custom settings
+  - Works on individual files, multiple files, and entire folders
+- **Registry Integration**: Automatic registration/unregistration
+- **Admin Privileges**: Required for registration only (not for runtime)
+- **Testing Scripts**: `test_context_menu.bat` for easy testing
+
+#### File Associations
+- Associate .lz4, .zstd, .nvcomp, and other compressed file types
+- Custom icons for each compression format
+- [TODO]"Extract here" context menu for compressed files
+- [TODO]Double-click to open/extract archives
+
+#### Windows Installer (WiX)
+- **Professional MSI installer** with Windows Installer technology
+- **Feature Selection**: Choose GUI, CLI, context menu, file associations, shortcuts
+- **Prerequisites**: Automatic check for Visual C++ Redistributable and CUDA
+- **Upgrade Support**: Automatically removes old versions during upgrade
+- **Clean Uninstall**: Removes all files, registry entries, and integrations
+- **Silent Installation**: Full support for enterprise deployment
+- **Code Signing Ready**: Integrated with SignTool for signed installers
+
+**Build the installer:**
+```bash
+cd platform/windows/installer
+build_installer.bat Release
+```
+
+**Or with CMake:**
+```bash
+cd build_gui
+cmake --build . --target installer --config Release
+```
+
+**Output:** `nvCOMP-4.0.0-x64.msi` (professional Windows installer)
+
+See `platform/windows/installer/README.md` for complete installer documentation.
+
+See `platform/windows/README.md` for complete platform integration documentation.
+
 ## Archive Format
 
 The tool uses a simple, efficient archive format for storing multiple files:

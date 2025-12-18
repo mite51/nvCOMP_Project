@@ -511,6 +511,177 @@ endif()
 # Set installation directories
 include(GNUInstallDirs)
 
+# ============================================================================
+# Windows Installer (WiX) Integration
+# ============================================================================
+
+if(WIN32 AND BUILD_GUI)
+    message(STATUS "Configuring Windows installer...")
+    
+    # Find WiX Toolset (check system installation first)
+    find_program(WIX_CANDLE candle.exe
+        HINTS
+            "${CMAKE_BINARY_DIR}/wix/bin"
+            "$ENV{WIX}bin"
+            "$ENV{ProgramFiles\(x86\)}/WiX Toolset v3.11/bin"
+            "$ENV{ProgramFiles\(x86\)}/WiX Toolset v3.14/bin"
+            "$ENV{ProgramFiles}/WiX Toolset v3.11/bin"
+            "$ENV{ProgramFiles}/WiX Toolset v3.14/bin"
+    )
+    
+    find_program(WIX_LIGHT light.exe
+        HINTS
+            "${CMAKE_BINARY_DIR}/wix/bin"
+            "$ENV{WIX}bin"
+            "$ENV{ProgramFiles\(x86\)}/WiX Toolset v3.11/bin"
+            "$ENV{ProgramFiles\(x86\)}/WiX Toolset v3.14/bin"
+            "$ENV{ProgramFiles}/WiX Toolset v3.11/bin"
+            "$ENV{ProgramFiles}/WiX Toolset v3.14/bin"
+    )
+    
+    if(NOT WIX_CANDLE OR NOT WIX_LIGHT)
+        message(STATUS "WiX Toolset not found. Attempting automatic download...")
+        
+        # Download WiX binaries (no admin rights required)
+        set(WIX_VERSION "3.14.1.8722")
+        set(WIX_ZIP_URL "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip")
+        set(WIX_INSTALL_DIR "${CMAKE_BINARY_DIR}/wix")
+        set(WIX_ZIP_FILE "${CMAKE_BINARY_DIR}/wix-binaries.zip")
+        
+        if(NOT EXISTS "${WIX_INSTALL_DIR}/bin/candle.exe")
+            message(STATUS "Downloading WiX ${WIX_VERSION} binaries...")
+            message(STATUS "  URL: ${WIX_ZIP_URL}")
+            message(STATUS "  Destination: ${WIX_INSTALL_DIR}")
+            message(STATUS "  This may take 1-2 minutes (~35 MB download)...")
+            
+            # Download WiX binaries
+            file(DOWNLOAD
+                "${WIX_ZIP_URL}"
+                "${WIX_ZIP_FILE}"
+                SHOW_PROGRESS
+                TIMEOUT 300
+                STATUS DOWNLOAD_STATUS
+            )
+            
+            list(GET DOWNLOAD_STATUS 0 DOWNLOAD_RESULT)
+            if(DOWNLOAD_RESULT EQUAL 0)
+                message(STATUS "Download complete. Extracting...")
+                
+                # Extract to wix directory
+                file(ARCHIVE_EXTRACT
+                    INPUT "${WIX_ZIP_FILE}"
+                    DESTINATION "${WIX_INSTALL_DIR}"
+                )
+                
+                # Verify extraction
+                if(EXISTS "${WIX_INSTALL_DIR}/candle.exe")
+                    # Move files from root to bin subdirectory for consistency
+                    file(MAKE_DIRECTORY "${WIX_INSTALL_DIR}/bin")
+                    file(GLOB WIX_BINARIES "${WIX_INSTALL_DIR}/*.exe" "${WIX_INSTALL_DIR}/*.dll")
+                    foreach(WIX_FILE ${WIX_BINARIES})
+                        get_filename_component(WIX_FILENAME "${WIX_FILE}" NAME)
+                        file(RENAME "${WIX_FILE}" "${WIX_INSTALL_DIR}/bin/${WIX_FILENAME}")
+                    endforeach()
+                    
+                    message(STATUS "WiX ${WIX_VERSION} installed successfully!")
+                    
+                    # Clean up zip file
+                    file(REMOVE "${WIX_ZIP_FILE}")
+                    
+                    # Set paths to downloaded binaries
+                    set(WIX_CANDLE "${WIX_INSTALL_DIR}/bin/candle.exe")
+                    set(WIX_LIGHT "${WIX_INSTALL_DIR}/bin/light.exe")
+                else()
+                    message(WARNING "Failed to extract WiX binaries. Installer target will be disabled.")
+                endif()
+            else()
+                list(GET DOWNLOAD_STATUS 1 DOWNLOAD_ERROR)
+                message(WARNING "Failed to download WiX binaries: ${DOWNLOAD_ERROR}")
+                message(STATUS "You can install WiX manually from: https://wixtoolset.org/releases/")
+            endif()
+        else()
+            message(STATUS "Using previously downloaded WiX binaries")
+            set(WIX_CANDLE "${WIX_INSTALL_DIR}/bin/candle.exe")
+            set(WIX_LIGHT "${WIX_INSTALL_DIR}/bin/light.exe")
+        endif()
+    endif()
+    
+    if(WIX_CANDLE AND WIX_LIGHT)
+        message(STATUS "WiX Toolset found:")
+        message(STATUS "  candle: ${WIX_CANDLE}")
+        message(STATUS "  light:  ${WIX_LIGHT}")
+        
+        # Define installer target
+        set(WIX_SOURCE_DIR "${CMAKE_SOURCE_DIR}/platform/windows/installer")
+        set(WIX_OUTPUT_DIR "${CMAKE_BINARY_DIR}/installer")
+        set(PRODUCT_VERSION "4.0.0")
+        
+        # Create output directory
+        file(MAKE_DIRECTORY "${WIX_OUTPUT_DIR}")
+        
+        # WiX source files
+        set(WIX_SOURCES
+            "${WIX_SOURCE_DIR}/installer.wxs"
+            "${WIX_SOURCE_DIR}/components.wxs"
+            "${WIX_SOURCE_DIR}/ui.wxs"
+        )
+        
+        # Compile WiX sources
+        add_custom_command(
+            OUTPUT
+                "${WIX_OUTPUT_DIR}/installer.wixobj"
+                "${WIX_OUTPUT_DIR}/components.wixobj"
+                "${WIX_OUTPUT_DIR}/ui.wixobj"
+            COMMAND ${WIX_CANDLE}
+                -nologo
+                -arch x64
+                -ext WixUIExtension
+                -ext WixUtilExtension
+                -dBuildConfiguration=$<CONFIG>
+                -out "${WIX_OUTPUT_DIR}/"
+                ${WIX_SOURCES}
+            WORKING_DIRECTORY "${WIX_SOURCE_DIR}"
+            DEPENDS ${WIX_SOURCES} nvcomp_gui
+            COMMENT "Compiling WiX installer sources..."
+        )
+        
+        # Link installer
+        add_custom_command(
+            OUTPUT "${WIX_OUTPUT_DIR}/nvCOMP-${PRODUCT_VERSION}-x64.msi"
+            COMMAND ${WIX_LIGHT}
+                -nologo
+                -ext WixUIExtension
+                -ext WixUtilExtension
+                -cultures:en-us
+                -b "${WIX_SOURCE_DIR}"
+                -out "${WIX_OUTPUT_DIR}/nvCOMP-${PRODUCT_VERSION}-x64.msi"
+                "${WIX_OUTPUT_DIR}/installer.wixobj"
+                "${WIX_OUTPUT_DIR}/components.wixobj"
+                "${WIX_OUTPUT_DIR}/ui.wixobj"
+                -sval
+            DEPENDS
+                "${WIX_OUTPUT_DIR}/installer.wixobj"
+                "${WIX_OUTPUT_DIR}/components.wixobj"
+                "${WIX_OUTPUT_DIR}/ui.wixobj"
+            COMMENT "Linking WiX installer package..."
+        )
+        
+        # Add installer target
+        add_custom_target(installer
+            DEPENDS "${WIX_OUTPUT_DIR}/nvCOMP-${PRODUCT_VERSION}-x64.msi"
+            COMMENT "Building Windows installer (MSI)"
+        )
+        
+        message(STATUS "Windows installer target 'installer' configured")
+        message(STATUS "  Build with: cmake --build . --target installer")
+        message(STATUS "  Output: ${WIX_OUTPUT_DIR}/nvCOMP-${PRODUCT_VERSION}-x64.msi")
+    else()
+        message(STATUS "WiX Toolset not found - installer target disabled")
+        message(STATUS "  Install WiX from: https://wixtoolset.org/releases/")
+        message(STATUS "  Or use build_installer.bat for manual builds")
+    endif()
+endif()
+
 # Installation summary
 message(STATUS "Installation configuration:")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
