@@ -16,7 +16,23 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
+// Updated: Multi-size icons with all resolutions (16-256px)
+// Index 0: Main nvCOMP icon (green) - used for .nvcomp files
 IDI_ICON1               ICON                    "nvcomp.ico"
+
+// Algorithm-specific icons for file associations (350KB each, 6 sizes)
+// Index 1: LZ4 (blue)
+IDI_ICON2               ICON                    "nvcomp_lz4.ico"
+// Index 2: Zstd (purple)
+IDI_ICON3               ICON                    "nvcomp_zstd.ico"
+// Index 3: Snappy (orange)
+IDI_ICON4               ICON                    "nvcomp_snappy.ico"
+// Index 4: GDeflate (teal)
+IDI_ICON5               ICON                    "nvcomp_gdeflate.ico"
+// Index 5: ANS (red)
+IDI_ICON6               ICON                    "nvcomp_ans.ico"
+// Index 6: Bitcomp (yellow/gold)
+IDI_ICON7               ICON                    "nvcomp_bitcomp.ico"
 
 #endif    // English (United States) resources
 /////////////////////////////////////////////////////////////////////////////

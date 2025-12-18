@@ -53,9 +53,11 @@ set(GUI_HEADERS
 if(WIN32)
     list(APPEND GUI_SOURCES
         ../platform/windows/context_menu.cpp
+        ../platform/windows/file_associations.cpp
     )
     list(APPEND GUI_HEADERS
         ../platform/windows/context_menu.h
+        ../platform/windows/file_associations.h
     )
 endif()
 
@@ -210,6 +212,7 @@ if(BUILD_TESTS)
     if(WIN32)
         list(APPEND TEST_SOURCES
             ../platform/windows/context_menu.cpp
+            ../platform/windows/file_associations.cpp
         )
     endif()
     

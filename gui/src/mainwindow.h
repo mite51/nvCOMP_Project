@@ -359,6 +359,18 @@ private slots:
      * Removes Windows Explorer context menu integration
      */
     void onUnregisterContextMenu();
+    
+    /**
+     * @brief Handles file association registration (Windows only)
+     * Registers file associations for compressed archive types
+     */
+    void onRegisterFileAssociations();
+    
+    /**
+     * @brief Handles file association unregistration (Windows only)
+     * Removes file associations for compressed archive types
+     */
+    void onUnregisterFileAssociations();
 };
 
 #endif // MAINWINDOW_H

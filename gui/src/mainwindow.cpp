@@ -32,6 +32,7 @@
 
 #ifdef _WIN32
 #include "../../platform/windows/context_menu.h"
+#include "../../platform/windows/file_associations.h"
 #endif
 
 // Helper class to keep the file dialog button always enabled
@@ -200,6 +201,21 @@ void MainWindow::setupConnections()
         ui->menuTools->addAction(unregisterContextMenuAction);
         connect(unregisterContextMenuAction, &QAction::triggered,
                 this, &MainWindow::onUnregisterContextMenu);
+        
+        // Add file association registration options (Windows only)
+        ui->menuTools->addSeparator();
+        
+        QAction *registerFileAssocAction = new QAction("Register File Associations...", this);
+        registerFileAssocAction->setToolTip("Associate compressed file types with nvCOMP (requires admin)");
+        ui->menuTools->addAction(registerFileAssocAction);
+        connect(registerFileAssocAction, &QAction::triggered,
+                this, &MainWindow::onRegisterFileAssociations);
+        
+        QAction *unregisterFileAssocAction = new QAction("Unregister File Associations...", this);
+        unregisterFileAssocAction->setToolTip("Remove file associations for compressed types (requires admin)");
+        ui->menuTools->addAction(unregisterFileAssocAction);
+        connect(unregisterFileAssocAction, &QAction::triggered,
+                this, &MainWindow::onUnregisterFileAssociations);
 #endif
     }
     
@@ -1361,6 +1377,170 @@ void MainWindow::onUnregisterContextMenu()
     }
 }
 
+// ============================================================================
+// Windows File Association Registration (Windows only)
+// ============================================================================
+
+void MainWindow::onRegisterFileAssociations()
+{
+    // Check if already registered
+    if (FileAssociationManager::areAllAssociated()) {
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            tr("File Associations Already Registered"),
+            tr("All nvCOMP file associations are already registered.\n\n"
+               "Do you want to re-register them (will overwrite existing entries)?"),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
+    
+    // Check for admin privileges
+    if (!FileAssociationManager::isRunningAsAdmin()) {
+        QMessageBox::warning(
+            this,
+            tr("Administrator Privileges Required"),
+            tr("Registering file associations requires administrator privileges.\n\n"
+               "Please restart this application as administrator:\n"
+               "1. Right-click nvcomp-gui.exe\n"
+               "2. Select 'Run as administrator'\n"
+               "3. Try again")
+        );
+        return;
+    }
+    
+    // Show info about what will be registered
+    QList<FileTypeInfo> fileTypes = FileAssociationManager::getSupportedFileTypes();
+    QStringList extensions;
+    for (const FileTypeInfo &ft : fileTypes) {
+        extensions.append(ft.extension);
+    }
+    
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this,
+        tr("Register File Associations"),
+        tr("This will associate the following file types with nvCOMP:\n\n%1\n\n"
+           "Double-clicking these files will open them in nvCOMP.\n"
+           "Custom icons will be displayed in Windows Explorer.\n"
+           "Context menu actions (Extract here, Extract to folder) will be added.\n\n"
+           "Continue?").arg(extensions.join(", ")),
+        QMessageBox::Yes | QMessageBox::No
+    );
+    
+    if (reply != QMessageBox::Yes) {
+        return;
+    }
+    
+    // Get application path
+    QString exePath = QCoreApplication::applicationFilePath();
+    
+    // Register
+    bool success = FileAssociationManager::registerAllAssociations(exePath);
+    
+    if (success) {
+        QMessageBox::information(
+            this,
+            tr("Registration Successful"),
+            tr("File associations have been registered successfully!\n\n"
+               "The following changes have been made:\n"
+               "• Double-click compressed files to open in nvCOMP\n"
+               "• Custom icons for each compression algorithm\n"
+               "• Right-click menu: 'Extract here' and 'Extract to folder'\n\n"
+               "Extensions registered:\n%1\n\n"
+               "Changes will take effect immediately.").arg(extensions.join(", "))
+        );
+        statusBar()->showMessage(tr("File associations registered successfully"), 5000);
+    } else {
+        QMessageBox::critical(
+            this,
+            tr("Registration Failed"),
+            tr("Failed to register file associations.\n\n"
+               "Error: %1").arg(FileAssociationManager::getLastError())
+        );
+        statusBar()->showMessage(tr("File association registration failed"), 5000);
+    }
+}
+
+void MainWindow::onUnregisterFileAssociations()
+{
+    // Check if any are registered
+    if (!FileAssociationManager::areAllAssociated()) {
+        // Check if at least some are registered
+        QList<FileTypeInfo> fileTypes = FileAssociationManager::getSupportedFileTypes();
+        bool anyRegistered = false;
+        for (const FileTypeInfo &ft : fileTypes) {
+            if (FileAssociationManager::isAssociated(ft.extension)) {
+                anyRegistered = true;
+                break;
+            }
+        }
+        
+        if (!anyRegistered) {
+            QMessageBox::information(
+                this,
+                tr("Not Registered"),
+                tr("No nvCOMP file associations are currently registered.")
+            );
+            return;
+        }
+    }
+    
+    // Check for admin privileges
+    if (!FileAssociationManager::isRunningAsAdmin()) {
+        QMessageBox::warning(
+            this,
+            tr("Administrator Privileges Required"),
+            tr("Removing file associations requires administrator privileges.\n\n"
+               "Please restart this application as administrator:\n"
+               "1. Right-click nvcomp-gui.exe\n"
+               "2. Select 'Run as administrator'\n"
+               "3. Try again")
+        );
+        return;
+    }
+    
+    // Confirm unregistration
+    QMessageBox::StandardButton reply = QMessageBox::question(
+        this,
+        tr("Confirm Unregistration"),
+        tr("Are you sure you want to remove nvCOMP file associations?\n\n"
+           "This will:\n"
+           "• Remove nvCOMP as the default program for these files\n"
+           "• Remove custom icons\n"
+           "• Remove context menu actions\n\n"
+           "You can re-register them later from the Tools menu."),
+        QMessageBox::Yes | QMessageBox::No
+    );
+    
+    if (reply != QMessageBox::Yes) {
+        return;
+    }
+    
+    // Unregister
+    bool success = FileAssociationManager::unregisterAllAssociations();
+    
+    if (success) {
+        QMessageBox::information(
+            this,
+            tr("Unregistration Successful"),
+            tr("File associations have been removed successfully!\n\n"
+               "nvCOMP will no longer be associated with compressed file types.")
+        );
+        statusBar()->showMessage(tr("File associations unregistered successfully"), 5000);
+    } else {
+        QMessageBox::critical(
+            this,
+            tr("Unregistration Failed"),
+            tr("Failed to unregister file associations.\n\n"
+               "Error: %1").arg(FileAssociationManager::getLastError())
+        );
+        statusBar()->showMessage(tr("File association unregistration failed"), 5000);
+    }
+}
+
 #else
 // Stub implementations for non-Windows platforms
 void MainWindow::onRegisterContextMenu()
@@ -1378,6 +1558,24 @@ void MainWindow::onUnregisterContextMenu()
         this,
         tr("Not Supported"),
         tr("Context menu unregistration is only supported on Windows.")
+    );
+}
+
+void MainWindow::onRegisterFileAssociations()
+{
+    QMessageBox::information(
+        this,
+        tr("Not Supported"),
+        tr("File association registration is only supported on Windows.")
+    );
+}
+
+void MainWindow::onUnregisterFileAssociations()
+{
+    QMessageBox::information(
+        this,
+        tr("Not Supported"),
+        tr("File association unregistration is only supported on Windows.")
     );
 }
 #endif
