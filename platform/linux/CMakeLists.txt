@@ -33,4 +33,54 @@ install(TARGETS linux_desktop_integration
     COMPONENT gui
 )
 
+# Install file manager integration files (Task 5.2)
+# These provide right-click context menu support for Nautilus and Nemo
+
+# Install Nautilus Python extension
+install(FILES
+    nautilus_extension.py
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/share/nvcomp/nautilus
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+    COMPONENT gui
+    OPTIONAL
+)
+
+# Install Nemo script
+install(FILES
+    nemo_script.sh
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/share/nvcomp/nemo
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    COMPONENT gui
+    OPTIONAL
+)
+
+# Install file manager integration installer script
+install(FILES
+    install_file_manager_integration.sh
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/share/nvcomp
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+    COMPONENT gui
+    OPTIONAL
+)
+
+# Install documentation
+install(FILES
+    README.md
+    FILE_MANAGER_TESTING.md
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/nvcomp/linux
+    COMPONENT gui
+    OPTIONAL
+)
+
+# Optional: Install Python unit tests (for development/testing)
+if(BUILD_TESTING)
+    install(FILES
+        test_nautilus_extension.py
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/nvcomp/tests
+        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+        COMPONENT gui
+        OPTIONAL
+    )
+endif()
+
 
