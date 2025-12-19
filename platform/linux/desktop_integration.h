@@ -155,3 +155,4 @@ private:
 
 #endif // DESKTOP_INTEGRATION_H
 
+

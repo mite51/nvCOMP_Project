@@ -156,6 +156,60 @@ bool DesktopIntegration::installMimeTypes()
 
 bool DesktopIntegration::installIcons()
 {
+    // Ensure the icon theme index exists
+    QString iconBasePath = getIconBasePath();
+    QString indexThemePath = iconBasePath + "/index.theme";
+    
+    if (!QFile::exists(indexThemePath)) {
+        // Create index.theme for hicolor icon theme
+        QString indexContent = 
+            "[Icon Theme]\n"
+            "Name=Hicolor\n"
+            "Comment=Fallback icon theme\n"
+            "Hidden=true\n"
+            "Directories=16x16/apps,32x32/apps,48x48/apps,64x64/apps,128x128/apps,256x256/apps\n"
+            "\n"
+            "[16x16/apps]\n"
+            "Size=16\n"
+            "Context=Applications\n"
+            "Type=Threshold\n"
+            "\n"
+            "[32x32/apps]\n"
+            "Size=32\n"
+            "Context=Applications\n"
+            "Type=Threshold\n"
+            "\n"
+            "[48x48/apps]\n"
+            "Size=48\n"
+            "Context=Applications\n"
+            "Type=Threshold\n"
+            "\n"
+            "[64x64/apps]\n"
+            "Size=64\n"
+            "Context=Applications\n"
+            "Type=Threshold\n"
+            "\n"
+            "[128x128/apps]\n"
+            "Size=128\n"
+            "Context=Applications\n"
+            "Type=Threshold\n"
+            "\n"
+            "[256x256/apps]\n"
+            "Size=256\n"
+            "Context=Applications\n"
+            "Type=Threshold\n";
+        
+        if (!ensureDirectoryExists(iconBasePath)) {
+            m_lastError = QString("Failed to create icon directory: %1").arg(iconBasePath);
+            return false;
+        }
+        
+        if (!writeFile(indexThemePath, indexContent)) {
+            m_lastError = QString("Failed to create index.theme: %1").arg(indexThemePath);
+            return false;
+        }
+    }
+    
     // Install icons in multiple sizes
     QList<int> sizes = {16, 32, 48, 64, 128, 256};
     bool allSuccess = true;

@@ -185,3 +185,4 @@ The implementation uses:
 - [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/)
 - [Shared MIME-info Specification](https://specifications.freedesktop.org/shared-mime-info-spec/)
 
+

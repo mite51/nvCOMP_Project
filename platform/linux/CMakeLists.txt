@@ -33,3 +33,4 @@ install(TARGETS linux_desktop_integration
     COMPONENT gui
 )
 
+
