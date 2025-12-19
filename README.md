@@ -361,6 +361,36 @@ See `platform/windows/installer/README.md` for complete installer documentation.
 
 See `platform/windows/README.md` for complete platform integration documentation.
 
+### Linux Desktop Integration
+
+nvCOMP integrates seamlessly with Linux desktop environments following freedesktop.org standards.
+
+#### Features
+- **Application Menu Entry**: Appears in Utilities → Archiving category
+- **MIME Type Associations**: Automatically handles .lz4, .zstd, .snappy, .nvcomp files
+- **File Icons**: Custom icons for nvCOMP and compressed file types
+- **Double-Click Support**: Compressed files open in nvCOMP
+- **Multi-Volume Recognition**: Handles .vol001.lz4, .vol002.lz4, etc.
+- **XDG Compliant**: Works with GNOME, KDE, XFCE, and other compliant DEs
+
+#### Installation
+1. Launch nvCOMP GUI
+2. Open Settings → Integration tab
+3. Enable "Desktop integration"
+4. Click Apply
+
+Installs to `~/.local/share` (no root privileges required)
+
+#### Uninstallation
+Uncheck "Desktop integration" in Settings → Integration tab
+
+#### Compatibility
+- Ubuntu 20.04, 22.04, 24.04
+- GNOME, KDE Plasma, XFCE, Cinnamon
+- Any freedesktop.org compliant desktop environment
+
+See `platform/linux/README.md` for complete Linux integration documentation.
+
 ## Archive Format
 
 The tool uses a simple, efficient archive format for storing multiple files:

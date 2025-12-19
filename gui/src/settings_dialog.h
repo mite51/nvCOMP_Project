@@ -12,6 +12,11 @@
 #include <QDialog>
 #include <QSettings>
 
+// Forward declarations for platform-specific classes
+#ifdef Q_OS_LINUX
+class DesktopIntegration;
+#endif
+
 QT_BEGIN_NAMESPACE
 namespace Ui { class SettingsDialog; }
 QT_END_NAMESPACE
@@ -126,10 +131,22 @@ private slots:
      * @param value Current volume size value
      */
     void onVolumeSizeChanged(int value);
+    
+#ifdef Q_OS_LINUX
+    /**
+     * @brief Handles Linux desktop integration checkbox toggle
+     * @param checked Whether integration should be enabled
+     */
+    void onLinuxDesktopIntegrationToggled(bool checked);
+#endif
 
 private:
     Ui::SettingsDialog *ui;  ///< Qt Designer generated UI
     QSettings m_settings;    ///< Settings storage
+    
+#ifdef Q_OS_LINUX
+    DesktopIntegration *m_desktopIntegration;  ///< Linux desktop integration helper
+#endif
     
     /**
      * @brief Sets up UI components and connections

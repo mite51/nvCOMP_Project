@@ -500,6 +500,12 @@ endif()
 if(BUILD_GUI)
     message(STATUS "Configuring GUI application...")
     
+    # Add Linux desktop integration first (must be before GUI)
+    if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platform/linux/CMakeLists.txt")
+        add_subdirectory(platform/linux)
+        message(STATUS "Linux desktop integration configured")
+    endif()
+    
     # GUI will be added in Phase 2 (Task 2.1+)
     # For now, just check that Qt6 is available
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/gui/CMakeLists.txt")

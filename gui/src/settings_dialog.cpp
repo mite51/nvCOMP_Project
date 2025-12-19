@@ -9,20 +9,47 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QFileInfo>
+#include <QCoreApplication>
+
+#ifdef Q_OS_LINUX
+#include "desktop_integration.h"
+#endif
 
 SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
     , ui(new Ui::SettingsDialog)
     , m_settings("nvCOMP", "nvCOMP GUI")
+#ifdef Q_OS_LINUX
+    , m_desktopIntegration(nullptr)
+#endif
 {
     ui->setupUi(this);
     setupUi();
     setupConnections();
     loadSettings();
+    
+#ifdef Q_OS_LINUX
+    // Initialize Linux desktop integration
+    QString execPath = QCoreApplication::applicationFilePath();
+    m_desktopIntegration = new DesktopIntegration(execPath, DesktopIntegration::UserOnly);
+    
+    // Update integration status in UI
+    bool isInstalled = m_desktopIntegration->isInstalled();
+    ui->checkBoxEnableContextMenu->setChecked(isInstalled);
+    ui->checkBoxEnableFileAssociations->setChecked(isInstalled);
+    
+    // On Linux, these options are combined into desktop integration
+    ui->checkBoxEnableContextMenu->setText("Enable desktop integration");
+    ui->checkBoxEnableFileAssociations->setVisible(false);
+    ui->checkBoxStartWithSystem->setVisible(false);
+#endif
 }
 
 SettingsDialog::~SettingsDialog()
 {
+#ifdef Q_OS_LINUX
+    delete m_desktopIntegration;
+#endif
     delete ui;
 }
 
@@ -71,6 +98,12 @@ void SettingsDialog::setupConnections()
             this, &SettingsDialog::onOutputTemplateChanged);
     connect(ui->spinBoxDefaultVolumeSize, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &SettingsDialog::onVolumeSizeChanged);
+    
+#ifdef Q_OS_LINUX
+    // Linux desktop integration
+    connect(ui->checkBoxEnableContextMenu, &QCheckBox::toggled,
+            this, &SettingsDialog::onLinuxDesktopIntegrationToggled);
+#endif
 }
 
 void SettingsDialog::loadSettings()
@@ -415,4 +448,51 @@ QVariant SettingsDialog::getDefaultValue(const QString &key, const QVariant &def
 {
     return m_settings.value(key, defaultValue);
 }
+
+#ifdef Q_OS_LINUX
+void SettingsDialog::onLinuxDesktopIntegrationToggled(bool checked)
+{
+    if (!m_desktopIntegration) {
+        return;
+    }
+    
+    if (checked) {
+        // Install desktop integration
+        if (m_desktopIntegration->install()) {
+            QMessageBox::information(this, tr("Desktop Integration"),
+                                   tr("Desktop integration installed successfully.\n"
+                                      "nvCOMP will now appear in your application menu and handle compressed files."));
+        } else {
+            QMessageBox::warning(this, tr("Desktop Integration"),
+                               tr("Failed to install desktop integration:\n%1")
+                               .arg(m_desktopIntegration->lastError()));
+            ui->checkBoxEnableContextMenu->setChecked(false);
+        }
+    } else {
+        // Uninstall desktop integration
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this,
+            tr("Remove Desktop Integration"),
+            tr("Are you sure you want to remove nvCOMP desktop integration?\n"
+               "This will remove the application menu entry and file associations."),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        
+        if (reply == QMessageBox::Yes) {
+            if (m_desktopIntegration->uninstall()) {
+                QMessageBox::information(this, tr("Desktop Integration"),
+                                       tr("Desktop integration removed successfully."));
+            } else {
+                QMessageBox::warning(this, tr("Desktop Integration"),
+                                   tr("Failed to remove desktop integration:\n%1")
+                                   .arg(m_desktopIntegration->lastError()));
+                ui->checkBoxEnableContextMenu->setChecked(true);
+            }
+        } else {
+            // User cancelled, keep it checked
+            ui->checkBoxEnableContextMenu->setChecked(true);
+        }
+    }
+}
+#endif
 

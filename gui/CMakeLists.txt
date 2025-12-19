@@ -99,6 +99,7 @@ target_include_directories(nvcomp_gui PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}  # For generated UI headers
     ${CMAKE_SOURCE_DIR}/core/include  # Core library API
     ${CMAKE_SOURCE_DIR}/platform/windows  # Platform-specific code
+    ${CMAKE_SOURCE_DIR}/platform/linux  # Linux platform-specific code
 )
 
 # ============================================================================
@@ -120,6 +121,13 @@ if(WIN32)
         shell32  # For SHChangeNotify
         advapi32  # For registry operations
     )
+elseif(UNIX AND NOT APPLE)
+    # Link Linux desktop integration library
+    if(TARGET linux_desktop_integration)
+        target_link_libraries(nvcomp_gui PRIVATE
+            linux_desktop_integration
+        )
+    endif()
 endif()
 
 # ============================================================================
@@ -223,6 +231,7 @@ if(BUILD_TESTS)
         ${CMAKE_CURRENT_BINARY_DIR}
         ${CMAKE_SOURCE_DIR}/core/include
         ${CMAKE_SOURCE_DIR}/platform/windows  # Platform-specific includes
+        ${CMAKE_SOURCE_DIR}/platform/linux  # Linux platform-specific includes
     )
     
     target_link_libraries(test_mainwindow PRIVATE
@@ -241,6 +250,13 @@ if(BUILD_TESTS)
             shell32  # For SHChangeNotify
             advapi32  # For registry operations
         )
+    elseif(UNIX AND NOT APPLE)
+        # Link Linux desktop integration library
+        if(TARGET linux_desktop_integration)
+            target_link_libraries(test_mainwindow PRIVATE
+                linux_desktop_integration
+            )
+        endif()
     endif()
     
     # Platform-specific test configuration
