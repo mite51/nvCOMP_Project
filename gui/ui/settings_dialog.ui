@@ -629,24 +629,5 @@
    </item>
   </layout>
  </widget>
- <connections>
-  <!-- Update VRAM label when slider changes -->
-  <connection>
-   <sender>sliderVramLimit</sender>
-   <signal>valueChanged(int)</signal>
-   <receiver>labelVramValue</receiver>
-   <slot>setNum(int)</slot>
-   <hints>
-    <hint type="sourcelabel">
-     <x>300</x>
-     <y>200</y>
-    </hint>
-    <hint type="destinationlabel">
-     <x>500</x>
-     <y>200</y>
-    </hint>
-   </hints>
-  </connection>
- </connections>
 </ui>
 

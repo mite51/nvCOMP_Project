@@ -61,6 +61,11 @@ void SettingsDialog::setupConnections()
     connect(ui->buttonRestoreDefaults, &QPushButton::clicked, 
             this, &SettingsDialog::onRestoreDefaultsClicked);
     
+    // VRAM slider to label connection (with explicit overload resolution for Linux compatibility)
+    connect(ui->sliderVramLimit, &QSlider::valueChanged, this, [this](int value) {
+        ui->labelVramValue->setText(QString::number(value) + "%");
+    });
+    
     // Validation connections
     connect(ui->lineEditOutputTemplate, &QLineEdit::textChanged,
             this, &SettingsDialog::onOutputTemplateChanged);
@@ -94,8 +99,9 @@ void SettingsDialog::loadSettings()
         ui->radioButtonPreferCpu->setChecked(true);
     }
     
-    ui->sliderVramLimit->setValue(
-        m_settings.value("performance/vramLimit", 80).toInt());
+    int vramLimit = m_settings.value("performance/vramLimit", 80).toInt();
+    ui->sliderVramLimit->setValue(vramLimit);
+    ui->labelVramValue->setText(QString::number(vramLimit) + "%");
     
     ui->spinBoxThreadCount->setValue(
         m_settings.value("performance/threadCount", 4).toInt());
@@ -189,6 +195,7 @@ void SettingsDialog::restoreDefaults()
     // Tab 2: Performance
     ui->radioButtonPreferGpu->setChecked(true);
     ui->sliderVramLimit->setValue(80);
+    ui->labelVramValue->setText("80%");
     ui->spinBoxThreadCount->setValue(4);
     ui->spinBoxChunkSize->setValue(128);
     

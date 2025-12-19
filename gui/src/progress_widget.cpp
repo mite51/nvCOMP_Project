@@ -428,7 +428,7 @@ void ProgressWidget::mouseMoveEvent(QMouseEvent *event)
                 break;
         }
         
-        QToolTip::showText(event->globalPos(), tooltip, this);
+        QToolTip::showText(event->globalPosition().toPoint(), tooltip, this);
     }
 }
 
