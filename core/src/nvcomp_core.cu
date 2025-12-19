@@ -908,6 +908,9 @@ static void compressGPUManagerFromBuffer(AlgoType algo, const std::vector<uint8_
     
     writeFile(outputFile, outputData.data(), outputData.size());
     
+    // Cleanup: destroy manager before stream (manager references stream)
+    manager.reset();
+    
     cudaFree(d_input);
     cudaFree(d_output);
     cudaStreamDestroy(stream);
@@ -983,6 +986,9 @@ static void compressGPUManagerFromBuffer(AlgoType algo, const std::vector<uint8_
         // Write volume file
         std::string volumeFile = generateVolumeFilename(outputFile, volIdx + 1);
         writeFile(volumeFile, outputData.data(), outputData.size());
+        
+        // Cleanup: destroy manager before stream (manager references stream)
+        manager.reset();
         
         cudaFree(d_input);
         cudaFree(d_output);
@@ -1113,6 +1119,9 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
             std::vector<uint8_t> archiveData(outputSize);
             CUDA_CHECK(cudaMemcpy(archiveData.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
             
+            // Cleanup: destroy manager before stream (manager references stream)
+            manager.reset();
+            
             cudaFree(d_input);
             cudaFree(d_output);
             cudaStreamDestroy(stream);
@@ -1196,6 +1205,9 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
             
             fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
             
+            // Cleanup: destroy manager before stream (manager references stream)
+            manager.reset();
+            
             cudaFree(d_input);
             cudaFree(d_output);
             cudaStreamDestroy(stream);
@@ -1247,6 +1259,9 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
     
     std::vector<uint8_t> archiveData(outputSize);
     CUDA_CHECK(cudaMemcpy(archiveData.data(), d_output, outputSize, cudaMemcpyDeviceToHost));
+    
+    // Cleanup: destroy manager before stream (manager references stream)
+    manager.reset();
     
     cudaFree(d_input);
     cudaFree(d_output);

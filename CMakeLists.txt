@@ -1,4 +1,26 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Linux: Fix for CUDA with newer glibc (Ubuntu 24.04, etc.)
+# CUDA 12.x has issues with GCC 13+ and glibc 2.39+ due to C23 features
+# Use GCC-12 as CUDA host compiler for better compatibility
+if(UNIX AND NOT APPLE)
+    # Check if GCC-12 is available
+    find_program(GCC12_CXX NAMES g++-12)
+    find_program(GCC12_CC NAMES gcc-12)
+    
+    if(GCC12_CXX AND GCC12_CC)
+        message(STATUS "Detected GCC 13+ on Ubuntu 24.04 - using GCC-12 for CUDA compatibility")
+        set(CMAKE_CUDA_HOST_COMPILER "${GCC12_CXX}" CACHE FILEPATH "CUDA host compiler" FORCE)
+        set(CMAKE_CXX_COMPILER "${GCC12_CXX}" CACHE FILEPATH "C++ compiler" FORCE)
+        set(CMAKE_C_COMPILER "${GCC12_CC}" CACHE FILEPATH "C compiler" FORCE)
+    else()
+        message(WARNING "GCC-12 not found. CUDA compilation may fail on Ubuntu 24.04 with GCC 13+")
+        message(WARNING "Install with: sudo apt-get install gcc-12 g++-12")
+        # Try to continue with --allow-unsupported-compiler flag
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+    endif()
+endif()
+
 project(NvCompCLI LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)

@@ -52,6 +52,10 @@ These algorithms use the nvCOMP Manager API which produces nvCOMP container form
 - CUDA Toolkit 11.0 or higher (optional for CPU-only mode)
 - NVIDIA GPU with Compute Capability 7.5+ (optional, will use CPU fallback if not available)
 - C++17 compatible compiler
+- **Linux specific**: GCC-12 recommended for CUDA compatibility (auto-detected by CMake)
+  - Ubuntu 24.04+: `sudo apt-get install gcc-12 g++-12`
+  - CMake automatically uses GCC-12 for CUDA when available
+  - Without GCC-12, build may fail on newer Linux distributions
 
 **GUI Requirements (optional):**
 - Qt 6.6+ (automatically downloaded if not present)
@@ -64,6 +68,8 @@ cmake -B build -DBUILD_CLI=ON -DBUILD_GUI=OFF
 cmake --build build --config Release
 
 # Linux
+# Note: On Ubuntu 24.04+, install GCC-12 first if not present:
+# sudo apt-get install gcc-12 g++-12
 cmake -B build -DBUILD_CLI=ON -DBUILD_GUI=OFF
 cmake --build build
 ```
