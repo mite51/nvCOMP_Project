@@ -1252,6 +1252,88 @@ void MainWindow::startCompressionFromCommandLine()
     onCompressClicked();
 }
 
+void MainWindow::startDecompressionFromCommandLine(const QString &outputDir)
+{
+    // Auto-start decompression (called after window is shown and event loop is running)
+    // This is used when --decompress flag is passed on command line
+    
+    if (m_fileList.isEmpty()) {
+        QMessageBox::warning(this, tr("No Files"),
+            tr("Cannot start decompression: no files selected."));
+        return;
+    }
+    
+    // Determine output directory
+    QString outputPath = outputDir;
+    
+    if (outputPath.isEmpty()) {
+        // If output directory not specified, ask user
+        outputPath = QFileDialog::getExistingDirectory(
+            this,
+            tr("Select Output Directory for Extraction"),
+            QString(),
+            QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
+        );
+        
+        if (outputPath.isEmpty()) {
+            // User canceled
+            return;
+        }
+    } else {
+        // Create output directory if it doesn't exist
+        QDir dir;
+        if (!dir.mkpath(outputPath)) {
+            QMessageBox::critical(this, tr("Error"),
+                tr("Failed to create output directory:\n%1").arg(outputPath));
+            return;
+        }
+    }
+    
+    // Start decompression with specified output path
+    // Create worker if it doesn't exist
+    if (!m_worker) {
+        m_worker = new CompressionWorker(this);
+        
+        // Connect signals (similar to onDecompressClicked)
+        connect(m_worker, &CompressionWorker::progressChanged,
+                this, &MainWindow::onWorkerProgress);
+        connect(m_worker, &CompressionWorker::progressDetails,
+                this, &MainWindow::onWorkerProgressDetails);
+        connect(m_worker, &CompressionWorker::finished,
+                this, &MainWindow::onWorkerFinished);
+        connect(m_worker, &CompressionWorker::error,
+                this, &MainWindow::onWorkerError);
+        connect(m_worker, &CompressionWorker::canceled,
+                this, &MainWindow::onWorkerCanceled);
+        connect(m_worker, &CompressionWorker::statusMessage,
+                this, &MainWindow::onWorkerStatusMessage);
+        
+        // Connect block-level progress signals
+        connect(m_worker, &CompressionWorker::totalBlocksChanged,
+                this, &MainWindow::onTotalBlocksChanged);
+        connect(m_worker, &CompressionWorker::blockProgressChanged,
+                this, &MainWindow::onBlockProgressChanged);
+        connect(m_worker, &CompressionWorker::blockCompleted,
+                this, &MainWindow::onBlockCompleted);
+        connect(m_worker, &CompressionWorker::throughputChanged,
+                this, &MainWindow::onThroughputChanged);
+        connect(m_worker, &CompressionWorker::stageChanged,
+                this, &MainWindow::onStageChanged);
+    }
+    
+    // Setup and start decompression
+    bool useCpuMode = ui->checkBoxCpuMode->isChecked();
+    m_worker->setupDecompress(m_fileList, outputPath, QString(), useCpuMode);
+    m_worker->start();
+    
+    // Update UI state
+    ui->buttonCompress->setEnabled(false);
+    ui->buttonClearFiles->setEnabled(false);
+    ui->buttonClearSelected->setEnabled(false);
+    ui->progressBar->setValue(0);
+    statusBar()->showMessage(tr("Extracting to: %1").arg(outputPath));
+}
+
 // ============================================================================
 // Windows Context Menu Registration (Windows only)
 // ============================================================================

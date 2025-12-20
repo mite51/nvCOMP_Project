@@ -43,6 +43,50 @@ These algorithms use the nvCOMP Batched API which produces raw compressed data c
 
 These algorithms use the nvCOMP Manager API which produces nvCOMP container format and only work GPU-to-GPU.
 
+## Shell Integration
+
+### Windows
+
+nvCOMP integrates seamlessly with Windows Explorer through file associations and context menus:
+
+#### File Associations
+- **Double-click archives**: Opens the file directly in archive viewer mode
+  - Supported formats: `.lz4`, `.zstd`, `.snappy`, `.nvcomp`, `.gdeflate`, `.ans`, `.bitcomp`
+  - Displays compression details, file list, and extraction options
+- **Custom icons**: Each compression algorithm has a unique color-coded icon
+- **Context menu actions**:
+  - Single compressed file → "Extract Here" and "Extract to Folder..."
+  - Regular files/folders → "Compress with nvCOMP"
+
+**Register file associations:**
+```bash
+# Run as administrator
+nvcomp_gui.exe --register-file-associations
+```
+
+**Unregister:**
+```bash
+# Run as administrator
+nvcomp_gui.exe --unregister-file-associations
+```
+
+Or use the Tools menu in the GUI: Tools → Register/Unregister File Associations
+
+### Linux
+
+nvCOMP integrates with Linux desktop environments (GNOME, KDE, XFCE) following freedesktop.org standards:
+
+#### Desktop Actions
+- **Double-click archives**: Opens in archive viewer
+- **Right-click menu**:
+  - Compress with nvCOMP (regular files)
+  - Extract Here (archives)
+  - Extract to Folder... (archives)
+- **MIME type associations**: Automatically recognizes compressed file formats
+- **Application menu entry**: Found in Utilities → Archiving
+
+**Installation is automatic** when the GUI is first run, or can be managed through Settings → Integration.
+
 ## Building
 
 ### Prerequisites
@@ -331,8 +375,10 @@ The Qt graphical interface provides an intuitive way to compress and decompress 
 #### File Associations
 - Associate .lz4, .zstd, .nvcomp, and other compressed file types
 - Custom icons for each compression format
-- [TODO]"Extract here" context menu for compressed files
-- [TODO]Double-click to open/extract archives
+- ✅ "Extract here" context menu for compressed files
+- ✅ "Extract to folder" context menu for compressed files
+- ✅ Double-click to open archives in archive viewer
+- Context-aware menus: compress for regular files, extract for archives
 
 #### Windows Installer (WiX)
 - **Professional MSI installer** with Windows Installer technology
@@ -369,7 +415,11 @@ nvCOMP integrates seamlessly with Linux desktop environments following freedeskt
 - **Application Menu Entry**: Appears in Utilities → Archiving category
 - **MIME Type Associations**: Automatically handles .lz4, .zstd, .snappy, .nvcomp files
 - **File Icons**: Custom icons for nvCOMP and compressed file types
-- **Double-Click Support**: Compressed files open in nvCOMP
+- **Double-Click Support**: Compressed files open in nvCOMP archive viewer
+- **Context Menu Actions**: 
+  - Compress with nvCOMP (for regular files)
+  - Extract Here (for archives)
+  - Extract to Folder... (for archives)
 - **Multi-Volume Recognition**: Handles .vol001.lz4, .vol002.lz4, etc.
 - **XDG Compliant**: Works with GNOME, KDE, XFCE, and other compliant DEs
 

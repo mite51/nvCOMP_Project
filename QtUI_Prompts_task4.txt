@@ -429,6 +429,58 @@ Testing: All features verified working ✅
 **Build Status**: Success (no errors)  
 **Test Status**: All features verified working
 
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+4.2B
+
+Windows Shell Integration Features
+File Associations:
+Double-click .lz4, .zstd, .snappy files → Opens Archive Viewer dialog
+Archive Viewer displays file contents and compression details
+Custom icons for each archive type in Windows Explorer
+Context Menu - Archive Files:
+Right-click compressed files → "nvCOMP" submenu with:
+View Archive (opens viewer)
+Extract Here (extracts to same folder)
+Extract to Folder... (prompts for destination)
+Context Menu - Regular Files/Folders:
+Right-click any file/folder → "nvCOMP" submenu with:
+Compress here (LZ4/Zstd/Snappy)
+Choose algorithm... (opens GUI)
+Technical Implementation:
+WinRAR-style cascading menus using Windows registry
+Context-aware: archives show extract options, regular files show compress options
+Proper Windows shell notifications for immediate integration
+Command-line argument parsing for --extract-here, --decompress, archive viewing
+Cross-Platform:
+Windows: Full registry-based shell integration
+Linux: Desktop integration via .desktop files and MIME types (untested)
+
+Issues Fixed:
+❌ Double-click didn't work → ✅ Now opens archive viewer
+❌ Context menu didn't appear/work → ✅ Now shows cascading "nvCOMP" submenu
+❌ Inconsistent naming → ✅ Both use "nvCOMP" label
+Key Technical Fixes:
+1. QString .arg() Issue (file_associations.cpp)
+Problem: QString("\"%1\" \"%%1\"").arg(exePath) was corrupting the %1 placeholder
+Fix: Changed to QString("\"%1\" \"%2\"").arg(exePath, "%1") to pass %1 literally
+2. Path Format Issue (file_associations.cpp)
+Problem: Forward slashes C:/path/ don't work in Windows registry commands
+Fix: Added QDir::toNativeSeparators(exePath) to use backslashes C:\path\
+3. Cascading Menu Structure (file_associations.cpp)
+Problem: Submenu wasn't appearing - wrong registry structure
+Fix: Added required registry keys:
+MUIVerb = "nvCOMP" - Sets the menu label
+SubCommands = "" - Tells Windows this has submenus
+shell\view, shell\extract_here, shell\extract_to - The actual submenu items
+4. Consistent Naming (context_menu.cpp)
+Problem: "Compress with nvCOMP" vs "nvCOMP"
+Fix: Changed both to just "nvCOMP" for consistency
+Final Result:
+Double-click .lz4 → Opens Archive Viewer ✅
+Right-click .lz4 → "nvCOMP" → View/Extract options ✅
+Right-click regular file → "nvCOMP" → Compress options ✅
+All use same "nvCOMP" branding ✅
+The critical insight: Windows registry shell commands require native backslash paths and exact placeholder syntax to work properly!
 
 =========================================================================
 

@@ -326,7 +326,7 @@ QString DesktopIntegration::generateDesktopFileContent() const
     content += "Name=nvCOMP\n";
     content += "GenericName=GPU-Accelerated Compression\n";
     content += "Comment=Compress and decompress files using NVIDIA GPU acceleration\n";
-    content += QString("Exec=%1 %f\n").arg(m_executablePath);
+    content += QString("Exec=%1 --add-file %%f\n").arg(m_executablePath);
     content += "Icon=nvcomp\n";
     content += "Terminal=false\n";
     content += "Categories=Utility;Archiving;Compression;Qt;\n";
@@ -334,17 +334,23 @@ QString DesktopIntegration::generateDesktopFileContent() const
     content += "Keywords=compress;decompress;archive;lz4;zstd;snappy;gpu;cuda;\n";
     content += "StartupNotify=true\n";
     content += "StartupWMClass=nvcomp\n";
+    content += "Actions=Compress;ExtractHere;ExtractTo;\n";
     content += "\n";
     
     // Desktop Actions
     content += "[Desktop Action Compress]\n";
-    content += "Name=Compress Files\n";
-    content += QString("Exec=%1 -c\n").arg(m_executablePath);
+    content += "Name=Compress with nvCOMP\n";
+    content += QString("Exec=%1 --compress --add-file %%F\n").arg(m_executablePath);
     content += "\n";
     
-    content += "[Desktop Action Decompress]\n";
-    content += "Name=Decompress Archive\n";
-    content += QString("Exec=%1 -d\n").arg(m_executablePath);
+    content += "[Desktop Action ExtractHere]\n";
+    content += "Name=Extract Here\n";
+    content += QString("Exec=%1 --decompress --output-dir %%d --add-file %%f\n").arg(m_executablePath);
+    content += "\n";
+    
+    content += "[Desktop Action ExtractTo]\n";
+    content += "Name=Extract to Folder...\n";
+    content += QString("Exec=%1 --decompress --add-file %%f\n").arg(m_executablePath);
     content += "\n";
     
     return content;

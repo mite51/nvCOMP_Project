@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <QString>
+#include <QDir>
 #include <QDebug>
 
 // Initialize static members
@@ -348,40 +349,67 @@ bool FileAssociationManager::createProgId(
 
 bool FileAssociationManager::addShellCommands(const QString &progId, const QString &exePath)
 {
-    // Add "Open" command (default action)
-    QString openCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\open\\command").arg(progId);
-    QString openCommand = QString("\"%1\" --add-file \"%%1\"").arg(exePath);
-    if (!setRegistryValue(openCommandPath, "", openCommand)) {
+    // Normalize path to Windows format (backslashes)
+    QString windowsPath = QDir::toNativeSeparators(exePath);
+    
+    // Create "nvCOMP" cascading menu (like WinRAR style)
+    QString nvcompMenuPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP").arg(progId);
+    
+    // Set the display name using MUIVerb (required for cascading menus)
+    if (!setRegistryValue(nvcompMenuPath, "MUIVerb", "nvCOMP")) {
         return false;
     }
     
-    // Set "Open" as friendly name
-    QString openPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\open").arg(progId);
-    if (!setRegistryValue(openPath, "", "Open with nvCOMP")) {
+    // Set icon for the main menu
+    if (!setRegistryValue(nvcompMenuPath, "Icon", QString("\"%1\",0").arg(windowsPath))) {
         return false;
     }
     
-    // Add "Extract Here" command
-    QString extractHerePath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\extract_here").arg(progId);
-    if (!setRegistryValue(extractHerePath, "", "Extract Here")) {
+    // Enable cascading menu (this tells Windows to look for submenus)
+    if (!setRegistryValue(nvcompMenuPath, "SubCommands", "")) {
         return false;
     }
     
-    QString extractHereCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\extract_here\\command").arg(progId);
-    QString extractHereCommand = QString("\"%1\" --add-file \"%%1\" --decompress --output-dir \"%%~dp1\"").arg(exePath);
+    // Add "View Archive" as first option in submenu
+    QString viewArchivePath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\view").arg(progId);
+    if (!setRegistryValue(viewArchivePath, "MUIVerb", "&View Archive")) {
+        return false;
+    }
+    
+    QString viewArchiveCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\view\\command").arg(progId);
+    QString viewArchiveCommand = QString("\"%1\" \"%2\"").arg(windowsPath, "%1");
+    if (!setRegistryValue(viewArchiveCommandPath, "", viewArchiveCommand)) {
+        return false;
+    }
+    
+    // Add "Extract Here" command under nvCOMP menu
+    QString extractHerePath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\extract_here").arg(progId);
+    if (!setRegistryValue(extractHerePath, "MUIVerb", "Extract &Here")) {
+        return false;
+    }
+    
+    QString extractHereCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\extract_here\\command").arg(progId);
+    QString extractHereCommand = QString("\"%1\" --extract-here \"%2\"").arg(windowsPath, "%1");
     if (!setRegistryValue(extractHereCommandPath, "", extractHereCommand)) {
         return false;
     }
     
-    // Add "Extract to Folder" command
-    QString extractToPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\extract_to").arg(progId);
-    if (!setRegistryValue(extractToPath, "", "Extract to Folder...")) {
+    // Add "Extract to Folder" command under nvCOMP menu
+    QString extractToPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\extract_to").arg(progId);
+    if (!setRegistryValue(extractToPath, "MUIVerb", "Extract to &Folder...")) {
         return false;
     }
     
-    QString extractToCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\extract_to\\command").arg(progId);
-    QString extractToCommand = QString("\"%1\" --add-file \"%%1\" --decompress").arg(exePath);
+    QString extractToCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\nvCOMP\\shell\\extract_to\\command").arg(progId);
+    QString extractToCommand = QString("\"%1\" --decompress \"%2\"").arg(windowsPath, "%1");
     if (!setRegistryValue(extractToCommandPath, "", extractToCommand)) {
+        return false;
+    }
+    
+    // Set "open" as the default double-click action (must be outside the submenu)
+    QString openCommandPath = QString("HKEY_CLASSES_ROOT\\%1\\shell\\open\\command").arg(progId);
+    QString openCommand = QString("\"%1\" \"%2\"").arg(windowsPath, "%1");
+    if (!setRegistryValue(openCommandPath, "", openCommand)) {
         return false;
     }
     

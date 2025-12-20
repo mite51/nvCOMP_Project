@@ -45,7 +45,7 @@ bool ContextMenuManager::registerContextMenu(const QString &exePath, const QStri
     QString fileMenuKey = "HKEY_CLASSES_ROOT\\*\\shell\\nvCOMP";
     
     // Main menu item - Use MUIVerb for proper cascading menu
-    setRegistryValue(fileMenuKey, "MUIVerb", "Compress with nvCOMP");
+    setRegistryValue(fileMenuKey, "MUIVerb", "nvCOMP");
     
     // Set icon (always set it, using exe path with icon index)
     // Format: "path\to\exe,0" means first icon resource in exe
@@ -101,7 +101,7 @@ bool ContextMenuManager::registerContextMenu(const QString &exePath, const QStri
     QString folderMenuKey = "HKEY_CLASSES_ROOT\\Directory\\shell\\nvCOMP";
     
     // Main menu item for folders - Use MUIVerb for proper cascading menu
-    setRegistryValue(folderMenuKey, "MUIVerb", "Compress with nvCOMP");
+    setRegistryValue(folderMenuKey, "MUIVerb", "nvCOMP");
     
     // Set icon (always set it with icon index)
     setRegistryValue(folderMenuKey, "Icon", iconPathWithIndex);

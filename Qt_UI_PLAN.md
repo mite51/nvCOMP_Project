@@ -643,14 +643,14 @@ typedef void (*nvcomp_progress_callback_t)(
 **Deliverables:**
 - `platform/windows/file_associations.cpp/h` - Association management
 - Register extensions: `.lz4`, `.zstd`, `.snappy`, `.nvcomp`
-- Custom icons for each archive type
+- ✅ Custom icons for each archive type
 - "Open with nvCOMP" as default action
 - Shell thumbnail provider (shows compression info)
 - Property sheet extension (archive properties)
 
 **Success Criteria:**
 - Double-clicking `.lz4` opens nvCOMP
-- Archive files show custom icons
+- ✅ Archive files show custom icons
 - File properties show compression details
 - Windows Search can index archive contents
 - ✅ All existing tests pass

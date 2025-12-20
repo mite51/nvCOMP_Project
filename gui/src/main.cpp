@@ -8,6 +8,8 @@
  * Command-line arguments:
  *   --add-file <path>                Add file/folder to GUI and open (for context menu)
  *   --compress                       Enable compress mode (requires --algorithm)
+ *   --decompress                     Enable decompress mode (extract files)
+ *   --output-dir <path>              Output directory for decompression
  *   --algorithm <algo>               Set algorithm: lz4, snappy, zstd, gdeflate, ans, bitcomp
  *   --register-context-menu          Register Windows Explorer context menu (admin required)
  *   --unregister-context-menu        Unregister Windows Explorer context menu (admin required)
@@ -25,13 +27,50 @@
 #include <QFileInfo>
 #include <QTimer>
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <iostream>
 #include "mainwindow.h"
+#include "archive_viewer.h"
 
 #ifdef _WIN32
 #include "../../platform/windows/context_menu.h"
 #include "../../platform/windows/file_associations.h"
 #endif
+
+/**
+ * @brief Helper function to check if a file is a compressed archive
+ * @param filePath Path to the file
+ * @return true if the file is a recognized compressed archive format
+ */
+bool isCompressedArchive(const QString& filePath)
+{
+    QFileInfo fileInfo(filePath);
+    QString suffix = fileInfo.suffix().toLower();
+    QString fileName = fileInfo.fileName().toLower();
+    
+    // Check for known compressed archive extensions
+    QStringList compressedExtensions = {
+        "lz4", "zstd", "snappy", "nvcomp", "gdeflate", "ans", "bitcomp"
+    };
+    
+    // Check if file has a known compressed extension
+    if (compressedExtensions.contains(suffix)) {
+        return true;
+    }
+    
+    // Check for multi-volume archives (e.g., .vol001.lz4)
+    QRegularExpression volRegex("\\.(lz4|zstd|snappy|nvcomp|gdeflate|ans|bitcomp)$");
+    if (fileName.contains(".vol") && volRegex.match(fileName).hasMatch()) {
+        return true;
+    }
+    
+    // Check for .nvcomp. pattern (e.g., archive.nvcomp.001)
+    if (fileName.contains(".nvcomp.")) {
+        return true;
+    }
+    
+    return false;
+}
 
 int main(int argc, char *argv[])
 {
@@ -66,6 +105,18 @@ int main(int argc, char *argv[])
         "Enable compress mode (for context menu)");
     parser.addOption(compressOption);
     
+    QCommandLineOption decompressOption(QStringList() << "decompress" << "d",
+        "Enable decompress mode (extract files)");
+    parser.addOption(decompressOption);
+    
+    QCommandLineOption extractHereOption("extract-here",
+        "Extract archive to its current directory (for context menu)");
+    parser.addOption(extractHereOption);
+    
+    QCommandLineOption outputDirOption(QStringList() << "output-dir" << "o",
+        "Output directory for decompression", "path");
+    parser.addOption(outputDirOption);
+    
     QCommandLineOption algorithmOption(QStringList() << "algorithm" << "alg",
         "Compression algorithm: lz4, snappy, zstd, gdeflate, ans, bitcomp", "algorithm");
     parser.addOption(algorithmOption);
@@ -95,7 +146,9 @@ int main(int argc, char *argv[])
     
     QStringList filesToAdd;
     QString algorithm;
+    QString outputDir;
     bool autoCompress = false;
+    bool autoDecompress = false;
     
     // Get files to add (can be specified multiple times or as positional args)
     if (parser.isSet(addFileOption)) {
@@ -132,6 +185,11 @@ int main(int argc, char *argv[])
         }
     }
     
+    // Get output directory for decompression
+    if (parser.isSet(outputDirOption)) {
+        outputDir = parser.value(outputDirOption);
+    }
+    
     // Check if auto-compress is requested
     if (parser.isSet(compressOption)) {
         autoCompress = true;
@@ -146,6 +204,58 @@ int main(int argc, char *argv[])
             QMessageBox::warning(nullptr, "No Algorithm",
                 "Compress mode requires --algorithm option.\n\nUsage: nvcomp-gui --compress --algorithm lz4 <file>");
             autoCompress = false;
+        }
+    }
+    
+    // Check if extract-here is requested (from context menu)
+    if (parser.isSet(extractHereOption)) {
+        autoDecompress = true;
+        
+        // Extract here requires files
+        if (filesToAdd.isEmpty()) {
+            QMessageBox::warning(nullptr, "No Files",
+                "Extract here requires at least one file.\n\nUsage: nvcomp-gui --extract-here <archive>");
+            autoDecompress = false;
+        }
+        
+        // Verify all files are compressed archives
+        for (const QString &file : filesToAdd) {
+            if (!isCompressedArchive(file)) {
+                QMessageBox::warning(nullptr, "Invalid File",
+                    QString("File is not a recognized compressed archive: %1\n\nSupported formats: .lz4, .zstd, .snappy, .nvcomp, .gdeflate, .ans, .bitcomp")
+                        .arg(QFileInfo(file).fileName()));
+                autoDecompress = false;
+                break;
+            }
+        }
+        
+        // Set output directory to the same directory as the archive
+        if (!filesToAdd.isEmpty() && autoDecompress) {
+            QFileInfo archiveInfo(filesToAdd.first());
+            outputDir = archiveInfo.absolutePath();
+        }
+    }
+    
+    // Check if auto-decompress is requested (with dialog)
+    if (parser.isSet(decompressOption) && !parser.isSet(extractHereOption)) {
+        autoDecompress = true;
+        
+        // Decompress mode requires files
+        if (filesToAdd.isEmpty()) {
+            QMessageBox::warning(nullptr, "No Files",
+                "Decompress mode requires at least one file.\n\nUsage: nvcomp-gui --decompress --output-dir /path <archive.lz4>");
+            autoDecompress = false;
+        }
+        
+        // Verify all files are compressed archives
+        for (const QString &file : filesToAdd) {
+            if (!isCompressedArchive(file)) {
+                QMessageBox::warning(nullptr, "Invalid File",
+                    QString("File is not a recognized compressed archive: %1\n\nSupported formats: .lz4, .zstd, .snappy, .nvcomp, .gdeflate, .ans, .bitcomp")
+                        .arg(QFileInfo(file).fileName()));
+                autoDecompress = false;
+                break;
+            }
         }
     }
     
@@ -315,6 +425,20 @@ int main(int argc, char *argv[])
 #endif
     
     // ========================================================================
+    // Handle special modes that don't require the main window
+    // ========================================================================
+    
+    // If single compressed file is opened without decompress/compress flags, open archive viewer
+    if (!autoCompress && !autoDecompress && filesToAdd.count() == 1) {
+        if (isCompressedArchive(filesToAdd.first())) {
+            // Open archive viewer dialog directly
+            ArchiveViewerDialog viewer(filesToAdd.first(), nullptr);
+            viewer.exec();
+            return 0;
+        }
+    }
+    
+    // ========================================================================
     // Create and show main window
     // ========================================================================
     
@@ -337,6 +461,15 @@ int main(int argc, char *argv[])
     if (autoCompress) {
         // Use QTimer::singleShot to delay compression start until event loop is running
         QTimer::singleShot(100, &window, &MainWindow::startCompressionFromCommandLine);
+    }
+    
+    // Auto-start decompression if requested
+    if (autoDecompress) {
+        // Use QTimer::singleShot to delay decompression start until event loop is running
+        // Can't use member function pointer because we need to pass the outputDir parameter
+        QTimer::singleShot(100, [&window, outputDir]() {
+            window.startDecompressionFromCommandLine(outputDir);
+        });
     }
     
     // Enter Qt event loop

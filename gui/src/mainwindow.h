@@ -115,6 +115,14 @@ public:
      * Used when --compress flag is passed on command line
      */
     void startCompressionFromCommandLine();
+    
+    /**
+     * @brief Starts decompression automatically (for context menu)
+     * @param outputDir Optional output directory (empty for dialog)
+     * 
+     * Used when --decompress flag is passed on command line
+     */
+    void startDecompressionFromCommandLine(const QString &outputDir = QString());
 
 protected:
     /**
