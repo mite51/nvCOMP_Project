@@ -3,6 +3,11 @@ build/
 build_gui/
 _deps/
 out/
+.debhelper/
+obj-x86_64-linux-gnu/
+tmp/
+__pycache__/
+debian/ 
 
 # Output directories
 output/
@@ -73,3 +78,6 @@ unit_test/*.zstd
 unit_test/*.gdeflate
 unit_test/*.ans
 unit_test/*.bitcomp
+
+build.log
+lintian.log

@@ -50,6 +50,8 @@ class NvcompMenuProvider(GObject.GObject, Nautilus.MenuProvider):
     - Opening archives in nvCOMP GUI
     """
     
+    __gtype_name__ = 'NvcompMenuProvider'
+    
     # Supported compression algorithms
     ALGORITHMS = [
         ('lz4', 'LZ4 (Fast, Good Ratio)', 'Fast compression with good compression ratio'),
@@ -79,11 +81,15 @@ class NvcompMenuProvider(GObject.GObject, Nautilus.MenuProvider):
         """Find nvcomp-gui executable."""
         # Check common locations
         search_paths = [
-            'nvcomp-gui',  # In PATH
+            'nvcomp_gui',  # In PATH (installed name)
+            'nvcomp-gui',  # Alternative name
             os.path.expanduser('~/Dev/nvCOMP_Project/build/gui/nvcomp_gui'),
             os.path.expanduser('~/.local/bin/nvcomp-gui'),
+            os.path.expanduser('~/.local/bin/nvcomp_gui'),
             '/usr/local/bin/nvcomp-gui',
+            '/usr/local/bin/nvcomp_gui',
             '/usr/bin/nvcomp-gui',
+            '/usr/bin/nvcomp_gui',  # Debian package install location
         ]
         
         for path in search_paths:

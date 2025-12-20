@@ -1,0 +1,7 @@
+# Debian package build outputs
+/platform/linux/packaged/
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+

@@ -374,6 +374,23 @@ nvCOMP integrates seamlessly with Linux desktop environments following freedeskt
 - **XDG Compliant**: Works with GNOME, KDE, XFCE, and other compliant DEs
 
 #### Installation
+
+**Via Debian Package (Recommended):**
+```bash
+# Build the package
+cd platform/linux
+./build_deb.sh --install-deps --no-sign
+
+# Install (from project root)
+cd ../..
+sudo dpkg -i platform/linux/packaged/nvcomp-gui_1.0.0-1_amd64.deb
+sudo apt-get install -f  # Install dependencies
+
+# Uninstall
+sudo apt-get remove nvcomp-gui
+```
+
+**Manual Desktop Integration:**
 1. Launch nvCOMP GUI
 2. Open Settings → Integration tab
 3. Enable "Desktop integration"
@@ -381,15 +398,30 @@ nvCOMP integrates seamlessly with Linux desktop environments following freedeskt
 
 Installs to `~/.local/share` (no root privileges required)
 
+#### Package Contents
+- **nvcomp-gui** (~800KB) - Full GUI application with desktop integration
+- **nvcomp-cli** (~630KB) - Command-line interface only (no Qt dependencies)
+- **nvcomp-dev** (~17KB) - Development headers for integration
+
 #### Uninstallation
+
+**Remove Package:**
+```bash
+sudo apt-get remove nvcomp-gui       # Remove package
+sudo apt-get purge nvcomp-gui        # Remove package + config
+sudo apt-get autoremove              # Clean up dependencies
+```
+
+**Manual Desktop Integration:**
 Uncheck "Desktop integration" in Settings → Integration tab
 
 #### Compatibility
-- Ubuntu 20.04, 22.04, 24.04
-- GNOME, KDE Plasma, XFCE, Cinnamon
-- Any freedesktop.org compliant desktop environment
+- **Distributions**: Ubuntu 20.04, 22.04, 24.04 | Debian 11, 12
+- **Desktop Environments**: GNOME, KDE Plasma, XFCE, Cinnamon
+- **Architecture**: amd64 (x86-64)
 
-See `platform/linux/README.md` for complete Linux integration documentation.
+See `platform/linux/README.md` for complete Linux integration documentation.  
+See `platform/linux/DEBIAN_PACKAGING.md` for detailed packaging guide.
 
 ## Archive Format
 
