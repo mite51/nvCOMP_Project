@@ -55,6 +55,7 @@ void printUsage(const char* appName) {
     std::cerr << "  --volume-size <N>  Set max volume size (default: 2.5GB)\n";
     std::cerr << "                     Examples: 1GB, 500MB, 5GB\n";
     std::cerr << "  --no-volumes       Disable volume splitting (single file)\n";
+    std::cerr << "  -v, --verbose      Print every file as it is added/extracted\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Compress with default 2.5GB volumes\n";
     std::cerr << "  " << appName << " -c input.txt output.lz4 lz4\n\n";
@@ -131,6 +132,7 @@ int main(int argc, char** argv) {
         // Default volume size: 2.5GB
         uint64_t maxVolumeSize = 2684354560ULL; // 2.5GB default
         bool noVolumes = false;
+        bool verbose = false;
         
         // Parse algorithm and flags
         for (int i = (mode == "-l" ? 3 : 4); i < argc; i++) {
@@ -139,6 +141,8 @@ int main(int argc, char** argv) {
                 forceCPU = true;
             } else if (arg == "--no-volumes") {
                 noVolumes = true;
+            } else if (arg == "--verbose" || arg == "-v") {
+                verbose = true;
             } else if (arg == "--volume-size") {
                 if (i + 1 < argc) {
                     i++;
@@ -162,6 +166,10 @@ int main(int argc, char** argv) {
         if (noVolumes) {
             maxVolumeSize = UINT64_MAX;
         }
+
+        // Apply verbose flag to the core. The CLI is the only consumer of this;
+        // the GUI never calls it, so its compression operations stay silent.
+        nvcomp_set_verbose(verbose ? 1 : 0);
         
         // Parse algorithm (default to NVCOMP_ALGO_UNKNOWN for auto-detection)
         nvcomp_algorithm_t algo = NVCOMP_ALGO_UNKNOWN;
@@ -209,16 +217,18 @@ int main(int argc, char** argv) {
         
         // Execute the requested operation using the C API
         nvcomp_error_t result = NVCOMP_SUCCESS;
+        nvcomp_compression_stats_t stats;
+        std::memset(&stats, 0, sizeof(stats));
         
         if (mode == "-c") {
             // Compression mode
             if (useCPU) {
-                result = nvcomp_compress_cpu(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize);
+                result = nvcomp_compress_cpu(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize, &stats);
             } else {
                 if (nvcomp_is_cross_compatible(algo)) {
-                    result = nvcomp_compress_gpu_batched(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize);
+                    result = nvcomp_compress_gpu_batched(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize, &stats);
                 } else {
-                    result = nvcomp_compress_gpu_manager(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize);
+                    result = nvcomp_compress_gpu_manager(NULL, algo, inputPath.c_str(), outputPath.c_str(), maxVolumeSize, &stats);
                 }
             }
             
@@ -226,16 +236,22 @@ int main(int argc, char** argv) {
                 printError("Compression failed");
                 return 1;
             }
+
+            // The core already prints the summary, so we don't need to repeat it here.
+            // But CLI users grepping for timing want a single line too.
+            std::cout << "Elapsed: " << stats.total_sec << " s  ("
+                      << stats.throughput_mbps << " MB/s, "
+                      << stats.throughput_gbps << " GB/s)" << std::endl;
             
         } else if (mode == "-d") {
             // Decompression mode
             if (useCPU) {
-                result = nvcomp_decompress_cpu(NULL, algo, inputPath.c_str(), outputPath.c_str());
+                result = nvcomp_decompress_cpu(NULL, algo, inputPath.c_str(), outputPath.c_str(), &stats);
             } else {
                 if (nvcomp_is_cross_compatible(algo)) {
-                    result = nvcomp_decompress_gpu_batched(NULL, algo, inputPath.c_str(), outputPath.c_str());
+                    result = nvcomp_decompress_gpu_batched(NULL, algo, inputPath.c_str(), outputPath.c_str(), &stats);
                 } else {
-                    result = nvcomp_decompress_gpu_manager(NULL, inputPath.c_str(), outputPath.c_str());
+                    result = nvcomp_decompress_gpu_manager(NULL, inputPath.c_str(), outputPath.c_str(), &stats);
                 }
             }
             
@@ -243,6 +259,10 @@ int main(int argc, char** argv) {
                 printError("Decompression failed");
                 return 1;
             }
+
+            std::cout << "Elapsed: " << stats.total_sec << " s  ("
+                      << stats.throughput_mbps << " MB/s, "
+                      << stats.throughput_gbps << " GB/s)" << std::endl;
             
         } else if (mode == "-l") {
             // List mode

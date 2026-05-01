@@ -2,6 +2,209 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [3.1.0] - 2026-05-01
+
+### Major Themes: GUI/CLI Performance Parity, Streaming Read Pipeline, Verbose Mode
+
+This release closes a long-standing 2x performance gap between the GUI and the
+CLI on identical inputs, and rewrites the "file add" (Read) phase so that
+multi-volume archives no longer build the entire payload in host memory before
+compression starts. As part of the same pass, all per-file console chatter is
+now silenced by default and gated behind a new `--verbose` flag.
+
+#### Added
+
+- **Per-Phase Compression Statistics (`nvcomp_compression_stats_t`)**
+  - New struct returned by every `nvcomp_compress_*` / `nvcomp_decompress_*`
+    C API entry point (optional out-parameter, NULL is allowed).
+  - Tracks wall-clock seconds for `read`, `prepare`, `compute`, and `write`,
+    plus `total_sec`, `input_bytes`, `output_bytes`, `throughput_mbps`,
+    `throughput_gbps`, and `ratio`.
+  - For decompression, `input_bytes` is the uncompressed (output) size so
+    the `ratio` field stays consistent with compression results.
+  - Both the CLI and the GUI now display the exact same summary, derived
+    from the same struct produced by the core.
+
+- **Verbose Flag (`-v` / `--verbose`)**
+  - New CLI flag that opts in to per-file output during the Read phase
+    (e.g. "Adding: path/to/file.bin").
+  - Backed by `nvcomp_set_verbose(int)` / `nvcomp_get_verbose()` in the C
+    API, mirrored as `nvcomp_core::setVerbose` / `isVerbose` (atomic bool)
+    in C++. Default is silent.
+  - Final summaries (volume counts, totals, throughput) remain always-on.
+  - The GUI never enables verbose mode, so its compression operations
+    are never slowed by per-file `std::cout` flushes.
+
+- **Streaming Volume Pipeline**
+  - New `compressGPUBatchedStreaming(...)` and `compressCPUStreaming(...)`
+    helpers that walk the input file list one volume at a time, filling a
+    single reusable buffer directly from disk and feeding it to the
+    compressor.
+  - Volume 1 is held in memory just long enough to prepend the
+    `VolumeManifest`; volumes 2..N stream straight to disk.
+  - Mid-file splitting is preserved, so volume boundaries remain
+    deterministic and byte-identical to the previous (in-memory) path.
+  - `compressGPUBatched`, `compressGPUBatchedFileList`, `compressCPU`, and
+    `compressCPUFileList` now dispatch to the streaming pipeline whenever
+    the input would produce more than one volume; single-volume inputs
+    keep the original `createArchiveFrom*` + `compressFromBuffer` path.
+
+- **Memory-Mapped File Reads (`readFileInto`)**
+  - New helper in `core/src/archive.cpp` that maps files >= 16 MB directly
+    into memory:
+    - Windows: `CreateFileMappingW` + `MapViewOfFile` +
+      `PrefetchVirtualMemory` (when available).
+    - POSIX: `mmap(..., MAP_POPULATE)`.
+  - Smaller files and the mmap failure path fall back to `std::ifstream`.
+  - Used by `createArchiveFromFolder`, `createArchiveFromFile`, and
+    `createArchiveFromFileList` to write file bytes straight into the
+    archive buffer with no intermediate `std::vector`.
+
+- **Archive Entry Helpers**
+  - New `nvcomp_core::ArchiveEntry` struct (file path, relative path,
+    file size).
+  - New `collectArchiveEntries(folder)` and
+    `collectArchiveEntriesFromList(paths)` helpers used by the streaming
+    pipeline to enumerate inputs without loading them.
+
+- **Throttled Progress Callback Helper**
+  - New `makeThrottledCallback(...)` wrapper in the core that limits how
+    often progress callbacks fire (target ~10 Hz). Replaces the previous
+    fan-out of 5-7 cross-thread Qt signals per GPU chunk.
+
+- **Unit Tests for the New Behavior** (`unit_test/test_c_api.cpp`)
+  - `test_verbose_flag_default_silent` - asserts no per-file output when
+    verbose is off.
+  - `test_verbose_flag_emits_per_file` - asserts every input file appears
+    in stdout when verbose is on.
+  - `test_read_phase_throughput` - sanity-checks the new Read-phase
+    throughput against a regression baseline.
+  - `test_streaming_multi_volume_correctness` - compresses a folder large
+    enough to span multiple volumes and verifies the output is
+    byte-identical to a single-volume compression of the same data.
+  - `unit_test/test.bat` now invokes the CLI once with `--verbose` to
+    exercise the verbose code path end-to-end.
+
+#### Changed
+
+- **GUI Compression Worker (`gui/src/compression_worker.{h,cpp}`)**
+  - Rewritten to call exactly one core C API entry point per operation,
+    matching the CLI line-for-line.
+  - Replaces the previous fan-out of 7 cross-thread signals
+    (`totalBlocksChanged`, `blockProgressChanged`, `blockCompleted`,
+    `throughputChanged`, `stageChanged`, `progressChanged`,
+    `progressDetails`) with a single throttled `progressUpdate(percent,
+    stage, mbps, elapsedMs)` signal.
+  - All `qDebug()` chatter inside the hot path is removed.
+  - Removed the static, per-process state used to pipe callbacks to the
+    main thread; the worker now uses lock-free `QAtomicInt`s instead.
+  - The worker emits the per-phase `nvcomp_compression_stats_t` in the
+    `finished()` signal so the main window can render the same summary
+    the CLI prints.
+
+- **GUI Main Window (`gui/src/mainwindow.{h,cpp}`)**
+  - Consumes the new throttled `progressUpdate` signal and the stats
+    struct from `finished()`.
+  - The GPU monitor is paused while a compression operation is in flight
+    so its NVML polling no longer competes with the compressor for the
+    GPU's PCIe bandwidth.
+  - Status bar updates derive from the stats struct, removing the
+    per-chunk re-rendering that previously bottlenecked the event loop.
+
+- **CLI (`main.cu`)**
+  - Parses `-v` / `--verbose` and calls `nvcomp_set_verbose` before
+    dispatching the operation.
+  - Allocates a `nvcomp_compression_stats_t` and passes it through to the
+    selected compress/decompress entry point.
+  - Prints a single `Elapsed: <total_sec> s (MB/s, GB/s)` line after the
+    core's summary so existing scripts that grep for a timing line keep
+    working.
+  - `printUsage` documents the new flag.
+
+- **Per-File Console Output Is Now Opt-In**
+  - `createArchiveFromFolder`, `createArchiveFromFile`,
+    `createArchiveFromFileList`, `extractArchive`, `splitIntoVolumes`,
+    `compressGPUBatchedFromBuffer`, `compressGPUManagerFromBuffer`,
+    `decompressGPUBatched`, `decompressGPUManager`, and the CPU
+    equivalents all gate their per-file / per-volume `std::cout`
+    statements behind `nvcomp_core::isVerbose()`.
+  - Final summaries (volume counts, totals, throughput) still print
+    unconditionally.
+
+- **Archive Buffer Allocation Strategy (`core/src/archive.cpp`)**
+  - `createArchiveFrom*` now pre-computes the total archive size and
+    calls `archiveData.reserve()` exactly once, eliminating the
+    O(N^2) reallocation cascade that was visible on multi-thousand-file
+    inputs.
+  - File contents are written directly into the reserved region (via
+    `readFileInto`), removing the previous "read into temp vector,
+    then `insert()` into archive" double-copy.
+
+- **C API Signatures**
+  - All `nvcomp_compress_*` and `nvcomp_decompress_*` entry points now
+    take a trailing `nvcomp_compression_stats_t* out_stats` parameter.
+    Pass `NULL` to opt out.
+  - Added `nvcomp_set_verbose(int)` and `nvcomp_get_verbose(void)`.
+
+#### Fixed
+
+- **GUI was ~2x slower than the CLI on identical inputs.** Root causes
+  addressed in this release:
+  - Excessive cross-thread Qt signal traffic (5-7 signals per GPU chunk,
+    ~16K signals per GB of input).
+  - `qDebug()` calls inside the per-chunk hot path.
+  - Mutex contention on the progress queue between the worker thread and
+    the main thread.
+  - Static, process-wide callback state that serialized concurrent
+    operations.
+  - The GPU monitor competing with the compressor for PCIe bandwidth and
+    NVML polling time.
+  - A size accounting bug in the GUI that double-counted the compressed
+    output and inflated the "compressed bytes" displayed in the
+    status bar.
+
+- **Multi-Volume Read Phase Was Disproportionately Slow**
+  - For a 4.73 GB / 2-volume input the Read phase was taking ~52 s out
+    of 72 s of total wall clock. Root causes:
+    - `std::vector::insert` on the archive buffer triggering repeated
+      reallocations and full `memcpy` of the partial archive.
+    - Files being copied twice (disk -> temporary buffer -> archive
+      buffer).
+    - `std::cout` being flushed on every file added.
+  - All three are fixed by the new reserve-and-fill strategy, the
+    `readFileInto` mmap helper, and the verbose-gated stdout.
+
+- **`unit_test/test_c_api.cpp` Cold-Cache Failures**
+  - Calls like `nvcomp_create_directories("output/test_c_api")` only
+    created the parent directory (`output/`), causing tests 7, 8, 9,
+    and 14 to fail with "Failed to open output file" on a clean run.
+  - Fixed by passing a placeholder filename
+    (`"output/test_c_api/.placeholder"`) so the target directory itself
+    is created.
+
+#### Performance
+
+- **GUI now matches CLI throughput** on the same input file/folder
+  within measurement noise (verified by the new CLI-vs-GUI timing
+  hook in `test.bat`).
+- **Read phase throughput** for the 4.73 GB / 2-volume reference input
+  improved from 90.3 MB/s to multiple GB/s (limited by storage rather
+  than the archive layer).
+- **Peak host memory during compression** of multi-volume archives is
+  now bounded by ~1 volume rather than the full input, thanks to the
+  streaming pipeline.
+
+#### Breaking Changes
+
+- **C API signatures changed** for every `nvcomp_compress_*` and
+  `nvcomp_decompress_*` entry point: a trailing
+  `nvcomp_compression_stats_t* out_stats` parameter has been added.
+  External callers that link against the C API must pass `NULL` (or
+  a real stats struct) at the new position. The GUI and CLI in this
+  repository have been updated; out-of-tree callers must recompile.
+
+---
+
 ## [3.0.0] - 2025-12-07
 
 ### Major New Feature: Multi-Volume Support 🎉

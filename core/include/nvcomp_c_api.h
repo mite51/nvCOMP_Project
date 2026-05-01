@@ -67,6 +67,35 @@ typedef enum {
 typedef struct nvcomp_operation_t* nvcomp_operation_handle;
 
 // ============================================================================
+// Compression Statistics
+// ============================================================================
+
+/**
+ * @brief Phase-by-phase timing/metrics for a single compression or
+ *        decompression operation.
+ *
+ * Pass a pointer to one of these structs as the trailing `out_stats`
+ * argument of any nvcomp_compress_* / nvcomp_decompress_* call.
+ * NULL is allowed if the caller does not want stats.
+ *
+ * For decompression, input_bytes is the uncompressed (output) size and
+ * output_bytes is the compressed (input) size, so 'ratio' stays consistent
+ * with compression results.
+ */
+typedef struct {
+    double read_sec;          ///< Reading input + assembling in-memory archive
+    double prepare_sec;       ///< GPU buffer setup, host->device copies, scratch
+    double compute_sec;       ///< Actual compression/decompression kernels (sync wall time)
+    double write_sec;         ///< Writing output file(s)
+    double total_sec;         ///< Sum of the four phases
+    uint64_t input_bytes;     ///< Uncompressed payload size (in bytes)
+    uint64_t output_bytes;    ///< Compressed file size (in bytes)
+    double throughput_mbps;   ///< input_bytes / total_sec, in MB/s
+    double throughput_gbps;   ///< input_bytes / total_sec, in GB/s
+    double ratio;             ///< uncompressed / compressed
+} nvcomp_compression_stats_t;
+
+// ============================================================================
 // Progress Callback
 // ============================================================================
 
@@ -246,6 +275,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_set_block_progress_callback(
  * @param input_path Input file or folder path
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched(
@@ -253,7 +283,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched(
     nvcomp_algorithm_t algo,
     const char* input_path,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -264,6 +295,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched(
  * @param file_count Number of files in the array
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
@@ -272,7 +304,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
     const char** file_paths,
     size_t file_count,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -281,13 +314,15 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_batched_file_list(
  * @param algo Algorithm to use
  * @param input_file Input compressed file path
  * @param output_path Output file or folder path
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_decompress_gpu_batched(
     nvcomp_operation_handle handle,
     nvcomp_algorithm_t algo,
     const char* input_file,
-    const char* output_path
+    const char* output_path,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -297,6 +332,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_decompress_gpu_batched(
  * @param input_path Input file or folder path
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager(
@@ -304,7 +340,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager(
     nvcomp_algorithm_t algo,
     const char* input_path,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -315,6 +352,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager(
  * @param file_count Number of files in the array
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
@@ -323,7 +361,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
     const char** file_paths,
     size_t file_count,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -331,12 +370,14 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_gpu_manager_file_list(
  * @param handle Operation handle (can be NULL)
  * @param input_file Input compressed file path
  * @param output_path Output file or folder path
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_decompress_gpu_manager(
     nvcomp_operation_handle handle,
     const char* input_file,
-    const char* output_path
+    const char* output_path,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -346,6 +387,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_decompress_gpu_manager(
  * @param input_path Input file or folder path
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu(
@@ -353,7 +395,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu(
     nvcomp_algorithm_t algo,
     const char* input_path,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -364,6 +407,7 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu(
  * @param file_count Number of files in the array
  * @param output_file Output compressed file path
  * @param max_volume_size Maximum volume size (0 for no splitting)
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu_file_list(
@@ -372,7 +416,8 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu_file_list(
     const char** file_paths,
     size_t file_count,
     const char* output_file,
-    uint64_t max_volume_size
+    uint64_t max_volume_size,
+    nvcomp_compression_stats_t* out_stats
 );
 
 /**
@@ -381,14 +426,59 @@ NVCOMP_C_API nvcomp_error_t nvcomp_compress_cpu_file_list(
  * @param algo Algorithm to use
  * @param input_file Input compressed file path
  * @param output_path Output file or folder path
+ * @param out_stats Optional, populated with per-phase timing on success (can be NULL)
  * @return Error code
  */
 NVCOMP_C_API nvcomp_error_t nvcomp_decompress_cpu(
     nvcomp_operation_handle handle,
     nvcomp_algorithm_t algo,
     const char* input_file,
-    const char* output_path
+    const char* output_path,
+    nvcomp_compression_stats_t* out_stats
 );
+
+// ============================================================================
+// Stats Helpers
+// ============================================================================
+
+/**
+ * @brief Format a stats struct as a multi-line summary identical to the
+ *        one printed by the core after every operation.
+ * @param stats Stats to format (must not be NULL)
+ * @param op_name Short operation label, e.g. "Compression" or "Decompression"
+ * @param out_buffer Caller-provided buffer
+ * @param buffer_size Size of out_buffer in bytes
+ * @return Number of bytes written (excluding trailing NUL), or 0 on error.
+ */
+NVCOMP_C_API size_t nvcomp_format_stats_summary(
+    const nvcomp_compression_stats_t* stats,
+    const char* op_name,
+    char* out_buffer,
+    size_t buffer_size
+);
+
+// ============================================================================
+// Verbose Flag
+// ============================================================================
+
+/**
+ * @brief Enable or disable verbose stdout chatter from the core (per-file
+ *        "Adding:" lines, per-volume progress messages, etc.).
+ *
+ * Default is off. The CLI flips it on for --verbose / -v. Final result
+ * summaries (stats, "SUCCESSFUL", extraction completion) are always printed
+ * regardless of this setting; this only gates incremental progress chatter
+ * that otherwise dominates Read-phase throughput on large inputs.
+ *
+ * @param verbose Non-zero to enable, zero to disable.
+ */
+NVCOMP_C_API void nvcomp_set_verbose(int verbose);
+
+/**
+ * @brief Query the current verbose flag.
+ * @return Non-zero if verbose output is enabled.
+ */
+NVCOMP_C_API int nvcomp_get_verbose(void);
 
 // ============================================================================
 // Algorithm Detection

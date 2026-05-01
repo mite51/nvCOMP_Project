@@ -1,10 +1,21 @@
 /**
  * @file compression_worker.h
  * @brief Worker thread for compression/decompression operations
- * 
- * Provides a QThread-based worker that performs compression operations
- * in the background without freezing the UI. Supports progress reporting,
- * cancellation, and error handling.
+ *
+ * A minimal QThread-based worker that:
+ *  - Calls exactly one core C API entry point per operation, mirroring the CLI.
+ *  - Reports progress via a single throttled signal so the main thread is never
+ *    flooded with cross-thread events.
+ *  - Returns the per-phase timing struct produced by the core in the finished()
+ *    signal so the GUI can render the same numbers the CLI prints.
+ *
+ * History: a previous version of this worker emitted 5-7 cross-thread Qt
+ * signals per GPU chunk (~16K per GB) AND piped them through main-thread slots
+ * that called qDebug() and rerendered the status bar per chunk. The result was
+ * GUI compression running ~2x slower than the CLI on the same input. The fix
+ * lives both here (single throttled signal, no static state) and in the core
+ * (deletion of the post-completion per-chunk callback loop and the new
+ * makeThrottledCallback helper).
  */
 
 #ifndef COMPRESSION_WORKER_H
@@ -21,244 +32,117 @@
 /**
  * @class CompressionWorker
  * @brief Background worker thread for compression operations
- * 
- * Handles compression and decompression operations in a separate thread
- * to keep the UI responsive. Emits signals for progress updates and
- * completion status.
  */
 class CompressionWorker : public QThread
 {
     Q_OBJECT
 
 public:
-    /**
-     * @brief Operation types
-     */
     enum OperationType {
         COMPRESS,
         DECOMPRESS
     };
 
-    /**
-     * @brief Constructs a compression worker
-     * @param parent Parent QObject
-     */
     explicit CompressionWorker(QObject *parent = nullptr);
-    
-    /**
-     * @brief Destroys the worker and cleans up resources
-     */
     ~CompressionWorker();
 
     /**
-     * @brief Configures compression operation
-     * @param files List of input files to compress
-     * @param outputPath Output archive path
-     * @param algorithm Algorithm to use (e.g., "lz4", "snappy", "zstd")
-     * @param useCpuMode Use CPU instead of GPU
-     * @param volumeSize Maximum volume size (0 for no splitting)
+     * Configures a compression operation. The set of paths matches what the
+     * user selected in the file list - both individual files and folders are
+     * accepted. The core library will recurse into folders.
      */
-    void setupCompress(const QStringList &files,
-                      const QString &outputPath,
-                      const QString &algorithm,
-                      bool useCpuMode,
-                      uint64_t volumeSize = 0);
+    void setupCompress(const QStringList &paths,
+                       const QString &outputPath,
+                       const QString &algorithm,
+                       bool useCpuMode,
+                       uint64_t volumeSize = 0);
 
     /**
-     * @brief Configures decompression operation
-     * @param files List of compressed files to decompress
-     * @param outputPath Output directory path
-     * @param algorithm Algorithm to use (auto-detect if empty)
-     * @param useCpuMode Use CPU instead of GPU
+     * Configures a decompression operation. Each path is decompressed into
+     * outputPath in turn (mirroring how the CLI handles a list of archives).
      */
     void setupDecompress(const QStringList &files,
-                        const QString &outputPath,
-                        const QString &algorithm,
-                        bool useCpuMode);
+                         const QString &outputPath,
+                         const QString &algorithm,
+                         bool useCpuMode);
 
     /**
-     * @brief Requests cancellation of the current operation
-     * 
-     * The operation will stop at the next safe checkpoint.
-     * The canceled() signal will be emitted.
+     * Requests cancellation. Checked at safe points; the operation may run to
+     * completion of the current core call before stopping.
      */
     void cancel();
+    bool isCanceled() const;
 
     /**
-     * @brief Checks if the operation was canceled
-     * @return true if cancellation was requested
-     */
-    bool isCanceled() const;
-    
-    /**
-     * @brief Gets elapsed time since operation started
-     * @return Elapsed time in milliseconds
+     * Elapsed time in milliseconds. While running this is the live elapsed
+     * time; after completion it is the final duration recorded by run().
      */
     qint64 getElapsedTime() const;
 
 signals:
     /**
-     * @brief Emitted when progress is updated
-     * @param percentage Progress percentage (0-100)
-     * @param currentFile Currently processing file
+     * Single throttled progress signal. Emitted at most ~10 times per second
+     * by run()'s throttled callback, with all the data the UI needs to update.
      */
-    void progressChanged(int percentage, const QString &currentFile);
+    void progressUpdate(int percent,
+                        const QString &stage,
+                        double mbps,
+                        qint64 elapsedMs);
 
     /**
-     * @brief Emitted with detailed progress information
-     * @param current Current bytes processed
-     * @param total Total bytes to process
-     * @param speedMBps Processing speed in MB/s
-     * @param etaSeconds Estimated time remaining in seconds
-     */
-    void progressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds);
-
-    /**
-     * @brief Emitted when total block count is known
-     * @param total Total number of blocks
-     */
-    void totalBlocksChanged(int total);
-
-    /**
-     * @brief Emitted when a block's progress changes
-     * @param block Block index
-     * @param progress Block progress (0.0 to 1.0)
-     */
-    void blockProgressChanged(int block, float progress);
-
-    /**
-     * @brief Emitted when a block completes
-     * @param block Block index
-     * @param ratio Compression ratio for this block
-     */
-    void blockCompleted(int block, float ratio);
-
-    /**
-     * @brief Emitted when throughput changes
-     * @param mbps Throughput in MB/s
-     */
-    void throughputChanged(double mbps);
-
-    /**
-     * @brief Emitted when processing stage changes
-     * @param stage Stage name
-     */
-    void stageChanged(QString stage);
-
-    /**
-     * @brief Emitted when operation completes successfully
-     * @param outputPath Path to the output file or directory
-     * @param compressionRatio Compression ratio (compressed/uncompressed), 0 for decompress
-     * @param durationMs Operation duration in milliseconds
-     */
-    void finished(const QString &outputPath, double compressionRatio, qint64 durationMs);
-
-    /**
-     * @brief Emitted when operation fails
-     * @param errorMessage Error description
-     */
-    void error(const QString &errorMessage);
-
-    /**
-     * @brief Emitted when operation is canceled
-     */
-    void canceled();
-
-    /**
-     * @brief Emitted with status messages
-     * @param message Status message for display
+     * Status text suitable for the status bar (start, output path, etc).
      */
     void statusMessage(const QString &message);
 
-protected:
     /**
-     * @brief Main thread execution function
-     * 
-     * Performs the configured operation in the background.
-     * Called automatically by QThread::start().
+     * Operation succeeded. stats holds the per-phase timing populated by the
+     * core; for decompression compressionRatio is 0.
      */
+    void finished(const QString &outputPath,
+                  const nvcomp_compression_stats_t &stats);
+
+    void error(const QString &errorMessage);
+    void canceled();
+
+protected:
     void run() override;
 
 private:
-    // Operation configuration
+    // Operation configuration (set under m_mutex by setup*())
     OperationType m_operationType;
-    QStringList m_inputFiles;
+    QStringList m_inputPaths;
     QString m_outputPath;
     QString m_algorithm;
     bool m_useCpuMode;
     uint64_t m_volumeSize;
 
-    // Progress tracking
+    // Live state
     QAtomicInt m_canceled;
-    uint64_t m_totalBytes;
-    uint64_t m_processedBytes;
     std::chrono::steady_clock::time_point m_startTime;
-    qint64 m_finalElapsedMs;  // Store final elapsed time when operation completes
+    qint64 m_finalElapsedMs;
     mutable QMutex m_mutex;
 
-    // nvCOMP operation handle
-    nvcomp_operation_handle m_operationHandle;
+    // Throttle bookkeeping for progressCallback. These live on the worker
+    // *instance* (NOT process-statics like the previous implementation) so
+    // multiple sequential operations don't poison each other.
+    int m_lastEmittedPercent;
+    std::chrono::steady_clock::time_point m_lastEmitTime;
+    QString m_lastEmittedStage;
 
-    /**
-     * @brief Performs compression operation
-     */
+    // Implementation
     void performCompress();
-
-    /**
-     * @brief Performs decompression operation
-     */
     void performDecompress();
-
-    /**
-     * @brief Progress callback for nvCOMP C API
-     * @param current Current progress value
-     * @param total Total progress value
-     * @param user_data Pointer to CompressionWorker instance
-     */
-    static void progressCallback(uint64_t current, uint64_t total, void* user_data);
-
-    /**
-     * @brief Block-level progress callback for nvCOMP C API
-     * @param handle Operation handle
-     * @param info Progress information
-     * @param user_data Pointer to CompressionWorker instance
-     */
-    static void blockProgressCallback(nvcomp_operation_handle handle,
-                                     const nvcomp_progress_info_t* info,
-                                     void* user_data);
-
-    /**
-     * @brief Updates progress information
-     * @param current Current bytes processed
-     * @param total Total bytes to process
-     */
-    void updateProgress(uint64_t current, uint64_t total);
-
-    /**
-     * @brief Calculates processing speed
-     * @return Speed in MB/s
-     */
-    double calculateSpeed() const;
-
-    /**
-     * @brief Estimates time remaining
-     * @return Estimated seconds remaining
-     */
-    int estimateTimeRemaining() const;
-
-    /**
-     * @brief Converts Qt algorithm string to nvCOMP algorithm enum
-     * @param algorithm Algorithm string
-     * @return nvCOMP algorithm type
-     */
     nvcomp_algorithm_t algorithmStringToEnum(const QString &algorithm) const;
 
-    /**
-     * @brief Gets total size of all input files
-     * @return Total size in bytes
-     */
-    uint64_t calculateTotalSize() const;
+    // Single static block-progress callback delivered to the C API. It
+    // forwards (with throttling) to the instance's progressUpdate() signal.
+    static void blockProgressCallback(nvcomp_operation_handle handle,
+                                      const nvcomp_progress_info_t *info,
+                                      void *user_data);
 };
 
-#endif // COMPRESSION_WORKER_H
+// Make the C stats struct a Qt-known metatype so it can travel through
+// queued signal/slot connections.
+Q_DECLARE_METATYPE(nvcomp_compression_stats_t)
 
+#endif // COMPRESSION_WORKER_H

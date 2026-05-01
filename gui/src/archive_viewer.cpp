@@ -252,11 +252,13 @@ bool ArchiveLoaderWorker::loadCompressedArchive(const QString& archivePath,
         if (useCPU) {
             result = nvcomp_decompress_cpu(handle, algo,
                 archivePath.toUtf8().constData(),
-                tempDir.toUtf8().constData());
+                tempDir.toUtf8().constData(),
+                nullptr);
         } else {
             result = nvcomp_decompress_gpu_batched(handle, algo,
                 archivePath.toUtf8().constData(),
-                tempDir.toUtf8().constData());
+                tempDir.toUtf8().constData(),
+                nullptr);
         }
         
         nvcomp_destroy_operation_handle(handle);
@@ -649,11 +651,13 @@ void ArchiveViewerDialog::extractFiles(const QString& outputPath, bool selectedO
         if (useCPU) {
             result = nvcomp_decompress_cpu(handle, algo,
                 m_archivePath.toUtf8().constData(),
-                outputPath.toUtf8().constData());
+                outputPath.toUtf8().constData(),
+                nullptr);
         } else {
             result = nvcomp_decompress_gpu_batched(handle, algo,
                 m_archivePath.toUtf8().constData(),
-                outputPath.toUtf8().constData());
+                outputPath.toUtf8().constData(),
+                nullptr);
         }
         
         if (result != NVCOMP_SUCCESS) {

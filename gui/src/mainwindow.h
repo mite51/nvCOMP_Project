@@ -12,6 +12,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "nvcomp_c_api.h"
+
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
 QT_END_NAMESPACE
@@ -258,28 +260,20 @@ private slots:
     void onBrowseOutputClicked();
     
     /**
-     * @brief Handles worker progress updates
-     * @param percentage Progress percentage (0-100)
-     * @param currentFile Currently processing file
+     * @brief Single throttled progress update from the worker.
+     *
+     * Replaces the previous fan-out of 7 separate per-chunk signals
+     * (totalBlocksChanged / blockProgressChanged / blockCompleted /
+     * throughputChanged / stageChanged / progressChanged / progressDetails),
+     * which were the main reason the GUI was ~2x slower than the CLI.
      */
-    void onWorkerProgress(int percentage, const QString &currentFile);
+    void onProgressUpdate(int percent, const QString &stage, double mbps, qint64 elapsedMs);
     
     /**
-     * @brief Handles worker detailed progress updates
-     * @param current Current bytes processed
-     * @param total Total bytes to process
-     * @param speedMBps Processing speed in MB/s
-     * @param etaSeconds Estimated time remaining in seconds
+     * @brief Handles worker completion. Receives the per-phase stats produced
+     *        by the core so the GUI renders the same summary as the CLI.
      */
-    void onWorkerProgressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds);
-    
-    /**
-     * @brief Handles worker completion
-     * @param outputPath Path to the output file or directory
-     * @param compressionRatio Compression ratio (compressed/uncompressed)
-     * @param durationMs Operation duration in milliseconds
-     */
-    void onWorkerFinished(const QString &outputPath, double compressionRatio, qint64 durationMs);
+    void onWorkerFinished(const QString &outputPath, const nvcomp_compression_stats_t &stats);
     
     /**
      * @brief Handles worker errors
@@ -316,38 +310,6 @@ private slots:
      * Opens GPU monitoring window
      */
     void onGPUMonitorTriggered();
-    
-    /**
-     * @brief Handles block progress updates from worker
-     * @param total Total blocks
-     */
-    void onTotalBlocksChanged(int total);
-    
-    /**
-     * @brief Handles block progress changes
-     * @param block Block index
-     * @param progress Block progress (0.0 to 1.0)
-     */
-    void onBlockProgressChanged(int block, float progress);
-    
-    /**
-     * @brief Handles block completion
-     * @param block Block index
-     * @param ratio Compression ratio
-     */
-    void onBlockCompleted(int block, float ratio);
-    
-    /**
-     * @brief Handles throughput updates
-     * @param mbps Throughput in MB/s
-     */
-    void onThroughputChanged(double mbps);
-    
-    /**
-     * @brief Handles stage changes
-     * @param stage Stage name
-     */
-    void onStageChanged(const QString &stage);
     
     /**
      * @brief Handles VRAM low warning from GPU monitor

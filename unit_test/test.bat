@@ -90,6 +90,54 @@ call :run_cross_test "GPU->CPU Snappy" snappy
 call :run_cross_test "GPU->CPU Zstd" zstd
 
 REM ============================================================================
+REM CLI Timing Harness (hands-off baseline for the CLI-vs-GUI comparison)
+REM ============================================================================
+REM
+REM This block runs the CLI twice and prints the per-phase stats summary. The
+REM identical summary is rendered by the GUI in onWorkerFinished, so a human
+REM (or a watching CI job) can eyeball that the GUI's numbers match the CLI's
+REM within the +/-10%% acceptance window from the plan.
+REM
+REM Set NVCOMP_TIMING_INPUT to point at a real, larger file (e.g. a 1 GB blob)
+REM to make the comparison meaningful. If unset we fall back to sample.txt
+REM which is too small to be representative but at least keeps the script
+REM self-contained.
+
+if "%NVCOMP_TIMING_INPUT%"=="" (
+    set TIMING_INPUT=sample.txt
+) else (
+    set TIMING_INPUT=%NVCOMP_TIMING_INPUT%
+)
+
+echo.
+echo ========================================
+echo CLI Timing Harness ^(CLI-vs-GUI parity check^)
+echo Input: %TIMING_INPUT%
+echo ========================================
+
+if not exist "%TIMING_INPUT%" (
+    echo   Skipping: timing input %TIMING_INPUT% not found.
+    goto :after_timing
+)
+
+echo.
+echo --- CLI run #1 ^(warm-up, GPU LZ4^) ---
+%EXE% -c "%TIMING_INPUT%" output\timing.lz4 lz4
+echo.
+echo --- CLI run #2 ^(measured, GPU LZ4^) ---
+%EXE% -c "%TIMING_INPUT%" output\timing.lz4 lz4
+echo.
+echo --- CLI run #3 ^(--verbose, smoke-checks per-file output toggling^) ---
+echo Expect one "Adding:" line per input file ^(or one "Added:" if it's a single file^).
+%EXE% -c "%TIMING_INPUT%" output\timing.lz4 lz4 --verbose
+echo.
+echo Now run the GUI on the same file and compare the per-phase stats summary
+echo it shows in the completion dialog with the "=== Compression stats ===" block
+echo printed above. They should match within ~10%% per the parity acceptance.
+
+:after_timing
+
+REM ============================================================================
 REM Summary
 REM ============================================================================
 

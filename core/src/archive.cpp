@@ -4,12 +4,142 @@
 #include <filesystem>
 #include <cstring>
 #include <iomanip>
+#include <sstream>
 #include <algorithm>
 #include <stdexcept>
+#include <atomic>
+
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#else
+    #include <fcntl.h>
+    #include <sys/mman.h>
+    #include <sys/stat.h>
+    #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
 namespace nvcomp_core {
+
+// ============================================================================
+// Verbose Flag
+// ============================================================================
+
+namespace {
+std::atomic<bool> g_verbose{false};
+} // namespace
+
+void setVerbose(bool verbose) {
+    g_verbose.store(verbose, std::memory_order_relaxed);
+}
+
+bool isVerbose() {
+    return g_verbose.load(std::memory_order_relaxed);
+}
+
+// ============================================================================
+// Stats Helpers
+// ============================================================================
+
+void finalizeStats(CompressionStats& stats) {
+    if (stats.totalSec <= 0.0) {
+        stats.totalSec = stats.readSec + stats.prepareSec + stats.computeSec + stats.writeSec;
+    }
+    if (stats.totalSec > 0.0 && stats.inputBytes > 0) {
+        double mb = static_cast<double>(stats.inputBytes) / (1024.0 * 1024.0);
+        stats.throughputMBps = mb / stats.totalSec;
+        stats.throughputGBps = stats.throughputMBps / 1024.0;
+    } else {
+        stats.throughputMBps = 0.0;
+        stats.throughputGBps = 0.0;
+    }
+    if (stats.outputBytes > 0) {
+        stats.ratio = static_cast<double>(stats.inputBytes) / static_cast<double>(stats.outputBytes);
+    } else {
+        stats.ratio = 0.0;
+    }
+}
+
+static std::string formatBytesHuman(uint64_t bytes) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+    if (bytes >= (1ULL << 30)) {
+        oss << (static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0)) << " GB";
+    } else if (bytes >= (1ULL << 20)) {
+        oss << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << " MB";
+    } else if (bytes >= (1ULL << 10)) {
+        oss << (static_cast<double>(bytes) / 1024.0) << " KB";
+    } else {
+        oss << bytes << " B";
+    }
+    return oss.str();
+}
+
+std::string formatStatsSummary(const CompressionStats& stats, const std::string& opName) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3);
+    oss << "=== " << opName << " stats ===\n";
+    oss << "  Read    : " << stats.readSec    << " s\n";
+    oss << "  Prepare : " << stats.prepareSec << " s\n";
+    oss << "  Compute : " << stats.computeSec << " s\n";
+    oss << "  Write   : " << stats.writeSec   << " s\n";
+    oss << "  Total   : " << stats.totalSec   << " s\n";
+    oss << "  Input   : " << formatBytesHuman(stats.inputBytes)  << " (" << stats.inputBytes  << " B)\n";
+    oss << "  Output  : " << formatBytesHuman(stats.outputBytes) << " (" << stats.outputBytes << " B)\n";
+    oss << std::setprecision(2);
+    oss << "  Speed   : " << stats.throughputMBps << " MB/s ("
+        << stats.throughputGBps << " GB/s)\n";
+    if (stats.ratio > 0.0) {
+        oss << "  Ratio   : " << stats.ratio << "x";
+    }
+    return oss.str();
+}
+
+// ============================================================================
+// Throttled Callback
+// ============================================================================
+
+namespace {
+struct ThrottleState {
+    std::chrono::steady_clock::time_point lastFire = std::chrono::steady_clock::time_point::min();
+    int lastPct = -1;
+    std::string lastStage;
+};
+} // namespace
+
+ProgressCallback makeThrottledCallback(ProgressCallback raw, double maxRateHz) {
+    if (!raw) return nullptr;
+    auto state = std::make_shared<ThrottleState>();
+    auto interval = std::chrono::nanoseconds(
+        static_cast<int64_t>(1.0e9 / std::max(1.0, maxRateHz)));
+
+    return [raw, state, interval](const BlockProgressInfo& info) {
+        const auto now = std::chrono::steady_clock::now();
+        const int pct = static_cast<int>(info.overallProgress * 100.0f);
+        const bool isTerminal = info.overallProgress >= 1.0f;
+        const bool stageChanged = info.stage != state->lastStage;
+        const bool pctAdvanced = pct != state->lastPct;
+        const bool timeElapsed = (now - state->lastFire) >= interval;
+
+        // Fire when:
+        //  - stage changed (always show stage transitions)
+        //  - reached 100% (always show completion)
+        //  - percent advanced AND enough time has passed
+        if (isTerminal || stageChanged || (pctAdvanced && timeElapsed)) {
+            state->lastFire = now;
+            state->lastPct = pct;
+            state->lastStage = info.stage;
+            raw(info);
+        }
+    };
+}
 
 // ============================================================================
 // File I/O Utilities
@@ -35,6 +165,111 @@ std::vector<uint8_t> readFile(const fs::path& filepath) {
 // String overload for backward compatibility
 std::vector<uint8_t> readFile(const std::string& filename) {
     return readFile(fs::path(filename));
+}
+
+// ============================================================================
+// Fast direct read into pre-allocated destination
+// ============================================================================
+//
+// Reads exactly `size` bytes from `path` directly into `dst`. For files larger
+// than MMAP_THRESHOLD this maps the file into our address space (Windows
+// CreateFileMappingW + MapViewOfFile, POSIX mmap+MAP_POPULATE) and memcpy's
+// into the caller's buffer. mmap eliminates the kernel-buffer -> user-buffer
+// copy that std::ifstream::read incurs and (with MAP_POPULATE / pre-touch)
+// turns the read into a single sequential I/O. For small files the syscall
+// overhead of mmap dominates so we fall back to std::ifstream::read.
+//
+// Errors (open fail, mapping fail, partial read) cleanly fall through to the
+// std::ifstream path before throwing - the caller never sees a partial buffer.
+namespace {
+constexpr uint64_t MMAP_THRESHOLD = 16 * 1024 * 1024; // 16 MB
+
+// std::ifstream fallback used by readFileInto() and as last resort on mmap fail.
+void readFileIntoStream(const fs::path& path, uint8_t* dst, uint64_t size) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open input file: " + path.string());
+    }
+    if (size == 0) return;
+    if (!file.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(size))) {
+        throw std::runtime_error("Failed to read file: " + path.string());
+    }
+}
+} // namespace
+
+void readFileInto(const fs::path& path, uint8_t* dst, uint64_t size) {
+    if (size == 0) return;
+    if (size < MMAP_THRESHOLD) {
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+
+#ifdef _WIN32
+    // Use the wide-character API so Unicode paths (which fs::path already
+    // holds as wide on Windows) survive intact.
+    HANDLE hFile = CreateFileW(path.wstring().c_str(),
+                               GENERIC_READ,
+                               FILE_SHARE_READ,
+                               nullptr,
+                               OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                               nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!hMap) {
+        CloseHandle(hFile);
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+    void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, static_cast<SIZE_T>(size));
+    if (!view) {
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+    // Hint the kernel to fault the whole range in eagerly so the memcpy below
+    // is one sequential read rather than thousands of demand-paged faults.
+    // Available since Windows 8 / Server 2012; ignore failure (best-effort).
+    typedef BOOL (WINAPI *PrefetchVirtualMemoryFn)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+    static PrefetchVirtualMemoryFn pfnPrefetch = []() -> PrefetchVirtualMemoryFn {
+        HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+        return hKernel ? reinterpret_cast<PrefetchVirtualMemoryFn>(
+            GetProcAddress(hKernel, "PrefetchVirtualMemory")) : nullptr;
+    }();
+    if (pfnPrefetch) {
+        WIN32_MEMORY_RANGE_ENTRY range{view, static_cast<SIZE_T>(size)};
+        pfnPrefetch(GetCurrentProcess(), 1, &range, 0);
+    }
+    std::memcpy(dst, view, static_cast<size_t>(size));
+    UnmapViewOfFile(view);
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+#else
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+    // MAP_POPULATE pre-faults pages so the memcpy is one sequential read.
+    // On platforms that don't have it (older POSIX), the flag is just ignored.
+    int flags = MAP_PRIVATE;
+#ifdef MAP_POPULATE
+    flags |= MAP_POPULATE;
+#endif
+    void* view = ::mmap(nullptr, static_cast<size_t>(size), PROT_READ, flags, fd, 0);
+    if (view == MAP_FAILED) {
+        ::close(fd);
+        readFileIntoStream(path, dst, size);
+        return;
+    }
+    std::memcpy(dst, view, static_cast<size_t>(size));
+    ::munmap(view, static_cast<size_t>(size));
+    ::close(fd);
+#endif
 }
 
 // Helper overload that accepts fs::path directly (avoids Unicode conversion issues)
@@ -158,6 +393,82 @@ static std::vector<fs::path> collectFiles(const fs::path& dirPath) {
 }
 
 // ============================================================================
+// Entry Enumeration (for streaming pipeline)
+// ============================================================================
+
+std::vector<ArchiveEntry> collectArchiveEntries(const std::string& folderOrFile) {
+    std::vector<ArchiveEntry> entries;
+    fs::path p(folderOrFile);
+
+    if (!fs::exists(p)) {
+        throw std::runtime_error("Path does not exist: " + folderOrFile);
+    }
+
+    if (fs::is_regular_file(p)) {
+        ArchiveEntry e;
+        e.filePath = p;
+        e.relativePath = p.filename().string();
+        e.fileSize = fs::file_size(p);
+        entries.push_back(std::move(e));
+        return entries;
+    }
+
+    if (!fs::is_directory(p)) {
+        throw std::runtime_error("Not a regular file or directory: " + folderOrFile);
+    }
+
+    auto files = collectFiles(p);
+    entries.reserve(files.size());
+    for (const auto& f : files) {
+        ArchiveEntry e;
+        e.filePath = f;
+        e.relativePath = getRelativePath(f, p);
+        if (e.relativePath.empty() || e.relativePath == ".") {
+            e.relativePath = f.filename().string();
+        }
+        e.fileSize = fs::file_size(f);
+        entries.push_back(std::move(e));
+    }
+    return entries;
+}
+
+std::vector<ArchiveEntry> collectArchiveEntriesFromList(const std::vector<std::string>& filePaths) {
+    std::vector<ArchiveEntry> entries;
+
+    for (const auto& itemPath : filePaths) {
+        fs::path p(itemPath);
+        if (!fs::exists(p)) {
+            std::cerr << "Warning: Skipping non-existent path: " << itemPath << std::endl;
+            continue;
+        }
+        if (fs::is_regular_file(p)) {
+            // Single file - use parent directory as base (matches createArchiveFromFileList).
+            ArchiveEntry e;
+            e.filePath = p;
+            e.relativePath = getRelativePath(p, p.parent_path());
+            if (e.relativePath.empty() || e.relativePath == ".") {
+                e.relativePath = p.filename().string();
+            }
+            e.fileSize = fs::file_size(p);
+            entries.push_back(std::move(e));
+        } else if (fs::is_directory(p)) {
+            auto files = collectFiles(p);
+            for (const auto& f : files) {
+                ArchiveEntry e;
+                e.filePath = f;
+                e.relativePath = getRelativePath(f, p);
+                if (e.relativePath.empty() || e.relativePath == ".") {
+                    e.relativePath = f.filename().string();
+                }
+                e.fileSize = fs::file_size(f);
+                entries.push_back(std::move(e));
+            }
+        }
+    }
+    return entries;
+}
+
+// ============================================================================
 // Archive Creation
 // ============================================================================
 
@@ -170,24 +481,46 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
     }
     
     std::vector<fs::path> files = collectFiles(basePath);
-    std::cout << "Collecting files from directory: " << folderPath << std::endl;
-    std::cout << "Found " << files.size() << " file(s)" << std::endl;
+    if (isVerbose()) {
+        std::cout << "Collecting files from directory: " << folderPath << "\n";
+        std::cout << "Found " << files.size() << " file(s)\n";
+    }
     
     if (files.empty()) {
         throw std::runtime_error("No files to archive");
     }
     
-    // Calculate total size for progress reporting
+    // Pre-compute exact archive size and per-file metadata so we can:
+    //   1. reserve archiveData once (no realloc cascade), and
+    //   2. read each file directly into the live tail of archiveData (no
+    //      intermediate temp vector / second memcpy).
+    struct PreparedEntry {
+        fs::path filePath;
+        std::string relativePath;
+        uint64_t fileSize;
+    };
+    std::vector<PreparedEntry> entries;
+    entries.reserve(files.size());
+
     uint64_t totalSize = 0;
+    size_t totalArchiveSize = sizeof(ArchiveHeader);
     for (const auto& filePath : files) {
-        totalSize += fs::file_size(filePath);
+        std::string relativePath = getRelativePath(filePath, basePath);
+        if (relativePath.empty() || relativePath == ".") {
+            relativePath = filePath.filename().string();
+        }
+        uint64_t fsize = fs::file_size(filePath);
+        totalSize += fsize;
+        totalArchiveSize += sizeof(FileEntry) + relativePath.size() + fsize;
+        entries.push_back({filePath, std::move(relativePath), fsize});
     }
-    
+    archiveData.reserve(totalArchiveSize);
+
     // Write header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
     header.version = ARCHIVE_VERSION;
-    header.fileCount = static_cast<uint32_t>(files.size());
+    header.fileCount = static_cast<uint32_t>(entries.size());
     header.reserved = 0;
     
     const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
@@ -195,42 +528,39 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
     
     // Write each file
     uint64_t processedSize = 0;
-    for (size_t i = 0; i < files.size(); i++) {
-        const auto& filePath = files[i];
-        std::string relativePath = getRelativePath(filePath, basePath);
-        if (relativePath.empty() || relativePath == ".") {
-            relativePath = filePath.filename().string();
-        }
-        
-        std::cout << "  Adding: " << relativePath << std::flush;
-        
-        auto fileData = readFile(filePath);
-        
+    const bool verbose = isVerbose();
+    for (size_t i = 0; i < entries.size(); i++) {
+        const auto& e = entries[i];
+
         FileEntry entry;
-        entry.pathLength = static_cast<uint32_t>(relativePath.length());
-        entry.fileSize = fileData.size();
+        entry.pathLength = static_cast<uint32_t>(e.relativePath.length());
+        entry.fileSize = e.fileSize;
         
-        // Write entry header
         const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
         archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
+        archiveData.insert(archiveData.end(), e.relativePath.begin(), e.relativePath.end());
+
+        // Read file data directly into archiveData's tail. Since we reserved
+        // totalArchiveSize up front, this resize() does not reallocate. Use
+        // mmap for large files (no kernel->user copy) and ifstream for small.
+        size_t writeOffset = archiveData.size();
+        archiveData.resize(writeOffset + e.fileSize);
+        readFileInto(e.filePath, archiveData.data() + writeOffset, e.fileSize);
         
-        // Write path
-        archiveData.insert(archiveData.end(), relativePath.begin(), relativePath.end());
-        
-        // Write file data
-        archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
-        
-        processedSize += fileData.size();
-        std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+        processedSize += e.fileSize;
+        if (verbose) {
+            std::cout << "  Adding: " << e.relativePath
+                      << " (" << e.fileSize << " bytes)\n";
+        }
         
         // Report progress (0-25% range for reading)
         if (callback && totalSize > 0) {
             float readProgress = static_cast<float>(processedSize) / totalSize;
             BlockProgressInfo info;
-            info.totalBlocks = static_cast<int>(files.size());
+            info.totalBlocks = static_cast<int>(entries.size());
             info.completedBlocks = static_cast<int>(i + 1);
             info.currentBlock = static_cast<int>(i);
-            info.currentBlockSize = fileData.size();
+            info.currentBlockSize = e.fileSize;
             info.overallProgress = readProgress * 0.25f;  // Scale to 0-25%
             info.currentBlockProgress = 1.0f;
             info.throughputMBps = 0.0;
@@ -250,9 +580,22 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, Progress
         throw std::runtime_error("File does not exist or is not a regular file: " + filePath);
     }
     
-    std::cout << "Adding single file: " << filePath << std::endl;
-    
-    // Write header
+    const bool verbose = isVerbose();
+    if (verbose) {
+        std::cout << "Adding single file: " << filePath << "\n";
+    }
+
+    std::string filename = p.filename().string();
+    uint64_t fileSize = fs::file_size(p);
+
+    // Reserve once for header + entry + path + file data. No realloc.
+    size_t totalArchiveSize = sizeof(ArchiveHeader)
+                              + sizeof(FileEntry)
+                              + filename.size()
+                              + fileSize;
+    archiveData.reserve(totalArchiveSize);
+
+    // Write archive header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
     header.version = ARCHIVE_VERSION;
@@ -261,26 +604,24 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, Progress
     
     const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
     archiveData.insert(archiveData.end(), headerBytes, headerBytes + sizeof(ArchiveHeader));
-    
-    // Read file data
-    auto fileData = readFile(filePath);
-    std::string filename = p.filename().string();
-    
+
+    // Write file entry header + path
     FileEntry entry;
     entry.pathLength = static_cast<uint32_t>(filename.length());
-    entry.fileSize = fileData.size();
+    entry.fileSize = fileSize;
     
-    // Write entry header
     const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
     archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
-    
-    // Write path
     archiveData.insert(archiveData.end(), filename.begin(), filename.end());
-    
-    // Write file data
-    archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
-    
-    std::cout << "  Added: " << filename << " (" << fileData.size() << " bytes)" << std::endl;
+
+    // Read file bytes directly into archiveData (no temp vector / second copy)
+    size_t writeOffset = archiveData.size();
+    archiveData.resize(writeOffset + fileSize);
+    readFileInto(p, archiveData.data() + writeOffset, fileSize);
+
+    if (verbose) {
+        std::cout << "  Added: " << filename << " (" << fileSize << " bytes)\n";
+    }
     
     // Report progress (0-25% range for reading)
     if (callback) {
@@ -288,7 +629,7 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, Progress
         info.totalBlocks = 1;
         info.completedBlocks = 1;
         info.currentBlock = 0;
-        info.currentBlockSize = fileData.size();
+        info.currentBlockSize = fileSize;
         info.overallProgress = 0.25f;  // Complete reading phase
         info.currentBlockProgress = 1.0f;
         info.throughputMBps = 0.0;
@@ -306,7 +647,10 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         throw std::runtime_error("No files to archive");
     }
     
-    std::cout << "Creating archive from " << filePaths.size() << " item(s)" << std::endl;
+    const bool verbose = isVerbose();
+    if (verbose) {
+        std::cout << "Creating archive from " << filePaths.size() << " item(s)\n";
+    }
     
     // Collect all files, expanding directories recursively
     struct FileWithBase {
@@ -340,19 +684,40 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         throw std::runtime_error("No files found to archive");
     }
     
-    std::cout << "Total files to archive: " << allFiles.size() << std::endl;
-    
-    // Calculate total size for progress reporting
-    uint64_t totalSize = 0;
-    for (const auto& fileWithBase : allFiles) {
-        totalSize += fs::file_size(fileWithBase.filePath);
+    if (verbose) {
+        std::cout << "Total files to archive: " << allFiles.size() << "\n";
     }
-    
-    // Write header
+
+    // Pre-compute exact archive size and per-file metadata so we can:
+    //   1. reserve archiveData once (no realloc cascade), and
+    //   2. read each file directly into the live tail of archiveData.
+    struct PreparedEntry {
+        fs::path filePath;
+        std::string relativePath;
+        uint64_t fileSize;
+    };
+    std::vector<PreparedEntry> entries;
+    entries.reserve(allFiles.size());
+
+    uint64_t totalSize = 0;
+    size_t totalArchiveSize = sizeof(ArchiveHeader);
+    for (const auto& fileWithBase : allFiles) {
+        std::string relativePath = getRelativePath(fileWithBase.filePath, fileWithBase.basePath);
+        if (relativePath.empty() || relativePath == ".") {
+            relativePath = fileWithBase.filePath.filename().string();
+        }
+        uint64_t fsize = fs::file_size(fileWithBase.filePath);
+        totalSize += fsize;
+        totalArchiveSize += sizeof(FileEntry) + relativePath.size() + fsize;
+        entries.push_back({fileWithBase.filePath, std::move(relativePath), fsize});
+    }
+    archiveData.reserve(totalArchiveSize);
+
+    // Write archive header
     ArchiveHeader header;
     header.magic = ARCHIVE_MAGIC;
     header.version = ARCHIVE_VERSION;
-    header.fileCount = static_cast<uint32_t>(allFiles.size());
+    header.fileCount = static_cast<uint32_t>(entries.size());
     header.reserved = 0;
     
     const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
@@ -360,42 +725,36 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
     
     // Write each file
     uint64_t processedSize = 0;
-    for (size_t i = 0; i < allFiles.size(); i++) {
-        const auto& fileWithBase = allFiles[i];
-        std::string relativePath = getRelativePath(fileWithBase.filePath, fileWithBase.basePath);
-        if (relativePath.empty() || relativePath == ".") {
-            relativePath = fileWithBase.filePath.filename().string();
-        }
-        
-        std::cout << "  Adding: " << relativePath << std::flush;
-        
-        auto fileData = readFile(fileWithBase.filePath);
-        
+    for (size_t i = 0; i < entries.size(); i++) {
+        const auto& e = entries[i];
+
         FileEntry entry;
-        entry.pathLength = static_cast<uint32_t>(relativePath.length());
-        entry.fileSize = fileData.size();
+        entry.pathLength = static_cast<uint32_t>(e.relativePath.length());
+        entry.fileSize = e.fileSize;
         
-        // Write entry header
         const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
         archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
+        archiveData.insert(archiveData.end(), e.relativePath.begin(), e.relativePath.end());
+
+        // Read file bytes directly into archiveData's tail (no realloc, no temp copy)
+        size_t writeOffset = archiveData.size();
+        archiveData.resize(writeOffset + e.fileSize);
+        readFileInto(e.filePath, archiveData.data() + writeOffset, e.fileSize);
         
-        // Write path
-        archiveData.insert(archiveData.end(), relativePath.begin(), relativePath.end());
-        
-        // Write file data
-        archiveData.insert(archiveData.end(), fileData.begin(), fileData.end());
-        
-        processedSize += fileData.size();
-        std::cout << " (" << fileData.size() << " bytes)" << std::endl;
+        processedSize += e.fileSize;
+        if (verbose) {
+            std::cout << "  Adding: " << e.relativePath
+                      << " (" << e.fileSize << " bytes)\n";
+        }
         
         // Report progress (0-25% range for reading)
         if (callback && totalSize > 0) {
             float readProgress = static_cast<float>(processedSize) / totalSize;
             BlockProgressInfo info;
-            info.totalBlocks = static_cast<int>(allFiles.size());
+            info.totalBlocks = static_cast<int>(entries.size());
             info.completedBlocks = static_cast<int>(i + 1);
             info.currentBlock = static_cast<int>(i);
-            info.currentBlockSize = fileData.size();
+            info.currentBlockSize = e.fileSize;
             info.overallProgress = readProgress * 0.25f;  // Scale to 0-25%
             info.currentBlockProgress = 1.0f;
             info.throughputMBps = 0.0;
@@ -431,7 +790,10 @@ void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& 
         throw std::runtime_error("Unsupported archive version");
     }
     
-    std::cout << "Extracting " << header.fileCount << " file(s) to: " << outputPath << std::endl;
+    const bool verbose = isVerbose();
+    if (verbose) {
+        std::cout << "Extracting " << header.fileCount << " file(s) to: " << outputPath << "\n";
+    }
     
     // Create output directory if it doesn't exist
     if (!outputPath.empty()) {
@@ -459,7 +821,9 @@ void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& 
         );
         offset += entry.pathLength;
         
-        std::cout << "  Extracting: " << filePath << " (" << entry.fileSize << " bytes)" << std::endl;
+        if (verbose) {
+            std::cout << "  Extracting: " << filePath << " (" << entry.fileSize << " bytes)\n";
+        }
         
         // Construct full output path
         fs::path fullPath = fs::path(outputPath) / fs::path(filePath);
@@ -472,7 +836,9 @@ void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& 
         offset += entry.fileSize;
     }
     
-    std::cout << "Extraction complete." << std::endl;
+    if (verbose) {
+        std::cout << "Extraction complete.\n";
+    }
 }
 
 // ============================================================================

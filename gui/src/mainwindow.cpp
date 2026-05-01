@@ -589,11 +589,11 @@ void MainWindow::onCompressClicked()
     if (!m_worker) {
         m_worker = new CompressionWorker(this);
         
-        // Connect signals
-        connect(m_worker, &CompressionWorker::progressChanged,
-                this, &MainWindow::onWorkerProgress);
-        connect(m_worker, &CompressionWorker::progressDetails,
-                this, &MainWindow::onWorkerProgressDetails);
+        // Single throttled progress signal + completion + error + status. The
+        // old fan-out of 7 per-chunk signals (totalBlocks/blockProgress/etc.)
+        // was the main reason the GUI was 2x slower than the CLI.
+        connect(m_worker, &CompressionWorker::progressUpdate,
+                this, &MainWindow::onProgressUpdate);
         connect(m_worker, &CompressionWorker::finished,
                 this, &MainWindow::onWorkerFinished);
         connect(m_worker, &CompressionWorker::error,
@@ -602,18 +602,12 @@ void MainWindow::onCompressClicked()
                 this, &MainWindow::onWorkerCanceled);
         connect(m_worker, &CompressionWorker::statusMessage,
                 this, &MainWindow::onWorkerStatusMessage);
-        
-        // Connect block-level progress signals
-        connect(m_worker, &CompressionWorker::totalBlocksChanged,
-                this, &MainWindow::onTotalBlocksChanged);
-        connect(m_worker, &CompressionWorker::blockProgressChanged,
-                this, &MainWindow::onBlockProgressChanged);
-        connect(m_worker, &CompressionWorker::blockCompleted,
-                this, &MainWindow::onBlockCompleted);
-        connect(m_worker, &CompressionWorker::throughputChanged,
-                this, &MainWindow::onThroughputChanged);
-        connect(m_worker, &CompressionWorker::stageChanged,
-                this, &MainWindow::onStageChanged);
+    }
+    
+    // Pause GPU monitor polling during the operation so its 500ms cudaSetDevice
+    // + cudaMemGetInfo timer does not contend with the worker's CUDA stream.
+    if (m_gpuMonitor) {
+        m_gpuMonitor->stopAutoRefresh();
     }
     
     // Setup and start compression
@@ -665,11 +659,8 @@ void MainWindow::onDecompressClicked()
     if (!m_worker) {
         m_worker = new CompressionWorker(this);
         
-        // Connect signals
-        connect(m_worker, &CompressionWorker::progressChanged,
-                this, &MainWindow::onWorkerProgress);
-        connect(m_worker, &CompressionWorker::progressDetails,
-                this, &MainWindow::onWorkerProgressDetails);
+        connect(m_worker, &CompressionWorker::progressUpdate,
+                this, &MainWindow::onProgressUpdate);
         connect(m_worker, &CompressionWorker::finished,
                 this, &MainWindow::onWorkerFinished);
         connect(m_worker, &CompressionWorker::error,
@@ -678,18 +669,10 @@ void MainWindow::onDecompressClicked()
                 this, &MainWindow::onWorkerCanceled);
         connect(m_worker, &CompressionWorker::statusMessage,
                 this, &MainWindow::onWorkerStatusMessage);
-        
-        // Connect block-level progress signals
-        connect(m_worker, &CompressionWorker::totalBlocksChanged,
-                this, &MainWindow::onTotalBlocksChanged);
-        connect(m_worker, &CompressionWorker::blockProgressChanged,
-                this, &MainWindow::onBlockProgressChanged);
-        connect(m_worker, &CompressionWorker::blockCompleted,
-                this, &MainWindow::onBlockCompleted);
-        connect(m_worker, &CompressionWorker::throughputChanged,
-                this, &MainWindow::onThroughputChanged);
-        connect(m_worker, &CompressionWorker::stageChanged,
-                this, &MainWindow::onStageChanged);
+    }
+    
+    if (m_gpuMonitor) {
+        m_gpuMonitor->stopAutoRefresh();
     }
     
     // Setup and start decompression
@@ -755,13 +738,17 @@ void MainWindow::onBrowseOutputClicked()
     }
 }
 
-void MainWindow::onWorkerProgress(int percentage, const QString &currentFile)
+void MainWindow::onProgressUpdate(int percent, const QString &stage, double mbps, qint64 elapsedMs)
 {
-    ui->progressBar->setValue(percentage);
-    
-    // Format: "Progress: XX% (elapsed time)"
+    // Single throttled UI tick. Replaces the old fan-out of progressChanged +
+    // progressDetails + totalBlocksChanged + blockProgressChanged +
+    // blockCompleted + throughputChanged + stageChanged. The worker (and core)
+    // already throttle these, so this slot can just paint.
+
+    m_currentStage = stage;
+
     auto formatElapsed = [](qint64 ms) -> QString {
-        int seconds = ms / 1000;
+        int seconds = static_cast<int>(ms / 1000);
         if (seconds < 60) return QString("%1s").arg(seconds);
         int mins = seconds / 60;
         int secs = seconds % 60;
@@ -770,66 +757,33 @@ void MainWindow::onWorkerProgress(int percentage, const QString &currentFile)
         mins = mins % 60;
         return QString("%1h %2m").arg(hours).arg(mins);
     };
-    
-    qint64 elapsed = m_worker ? m_worker->getElapsedTime() : 0;
-    QString elapsedStr = formatElapsed(elapsed);
-    
-    if (!currentFile.isEmpty()) {
-        ui->progressBar->setFormat(QString("%p% - %1").arg(elapsedStr));
+
+    ui->progressBar->setValue(percent);
+    QString stageLabel = stage.isEmpty() ? QString() : QString(" [%1]").arg(stage);
+    ui->progressBar->setFormat(QString("%p%%1 - %2").arg(stageLabel, formatElapsed(elapsedMs)));
+
+    QString stagePrefix = stage.isEmpty() ? QString() : QString("[%1] ").arg(stage.toUpper());
+    QString detailsText;
+    if (mbps > 0.0) {
+        detailsText = QString("%1%2%% @ %3 MB/s")
+                          .arg(stagePrefix)
+                          .arg(percent)
+                          .arg(mbps, 0, 'f', 2);
     } else {
-        ui->progressBar->setFormat(QString("%p% - %1").arg(elapsedStr));
+        detailsText = QString("%1%2%%").arg(stagePrefix).arg(percent);
     }
-}
-
-void MainWindow::onWorkerProgressDetails(uint64_t current, uint64_t total, double speedMBps, int etaSeconds)
-{
-    // Format size in human-readable form
-    auto formatSize = [](uint64_t bytes) -> QString {
-        if (bytes < 1024) return QString("%1 B").arg(bytes);
-        if (bytes < 1024 * 1024) return QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 2);
-        if (bytes < 1024 * 1024 * 1024) return QString("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
-        return QString("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
-    };
-    
-    // Format ETA
-    auto formatTime = [](int seconds) -> QString {
-        if (seconds < 60) return QString("%1s").arg(seconds);
-        if (seconds < 3600) return QString("%1m %2s").arg(seconds / 60).arg(seconds % 60);
-        return QString("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
-    };
-    
-    // Include stage in the details if available
-    QString stagePrefix = m_currentStage.isEmpty() ? "" : QString("[%1] ").arg(m_currentStage.toUpper());
-    QString detailsText = QString("%5%1 / %2 @ %3 MB/s (ETA: %4)")
-                             .arg(formatSize(current))
-                             .arg(formatSize(total))
-                             .arg(speedMBps, 0, 'f', 2)
-                             .arg(formatTime(etaSeconds))
-                             .arg(stagePrefix);
-    
     ui->labelStatus->setText(detailsText);
-    
-    // Update progress widget if it exists
-    if (m_progressWidget) {
-        m_progressWidget->setDataProgress(current, total);
-        m_progressWidget->updateThroughput(speedMBps);
-        m_progressWidget->setETA(etaSeconds);
-    }
 }
 
-void MainWindow::onWorkerFinished(const QString &outputPath, double compressionRatio, qint64 durationMs)
+void MainWindow::onWorkerFinished(const QString &outputPath, const nvcomp_compression_stats_t &stats)
 {
     // Clear current stage
     m_currentStage.clear();
-    
-    // Keep progress widget open so user can see final result
-    // They can close it manually
     
     // Re-enable buttons and restore Compress button text
     ui->buttonCompress->setText("🗜️ Compress");
     ui->buttonCompress->setToolTip("Compress selected files");
     ui->buttonCompress->setEnabled(true);
-    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
     ui->buttonClearFiles->setEnabled(true);
     ui->buttonClearSelected->setEnabled(true);
     
@@ -839,42 +793,59 @@ void MainWindow::onWorkerFinished(const QString &outputPath, double compressionR
     if (m_progressWidget) {
         m_progressWidget->updateOverallProgress(1.0f);
     }
-    
-    // Format duration
-    double durationSec = durationMs / 1000.0;
-    QString durationText;
-    if (durationSec < 60) {
-        durationText = QString("%1s").arg(durationSec, 0, 'f', 2);
-    } else {
-        int minutes = static_cast<int>(durationSec / 60);
-        double seconds = durationSec - (minutes * 60);
-        durationText = QString("%1m %2s").arg(minutes).arg(seconds, 0, 'f', 1);
+
+    // Resume GPU monitor polling (was paused for the duration of the operation
+    // to avoid CUDA contention with the worker).
+    if (m_gpuMonitor && m_gpuMonitor->isVisible()) {
+        m_gpuMonitor->startAutoRefresh();
     }
     
-    // Show completion message
-    QString message;
-    if (compressionRatio > 0.0) {
-        // Compression operation
-        double compressionPercent = compressionRatio * 100.0;
-        message = tr("Compression completed successfully!\n\n"
-                    "Output: %1\n"
-                    "Compression ratio: %2% (smaller is better)\n"
-                    "Time taken: %3")
-                    .arg(outputPath)
-                    .arg(compressionPercent, 0, 'f', 2)
-                    .arg(durationText);
-    } else {
-        // Decompression operation
-        message = tr("Decompression completed successfully!\n\n"
-                    "Output: %1\n"
-                    "Time taken: %2")
-                    .arg(outputPath)
-                    .arg(durationText);
+    // Render the same per-phase summary the CLI prints, populated from the
+    // core's stats struct.
+    auto fmtBytes = [](uint64_t b) -> QString {
+        if (b >= (1ULL << 30)) return QString("%1 GB").arg(b / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+        if (b >= (1ULL << 20)) return QString("%1 MB").arg(b / (1024.0 * 1024.0), 0, 'f', 2);
+        if (b >= (1ULL << 10)) return QString("%1 KB").arg(b / 1024.0, 0, 'f', 2);
+        return QString("%1 B").arg(b);
+    };
+
+    bool isCompression = stats.ratio > 0.0;
+    QString opName = isCompression ? tr("Compression") : tr("Decompression");
+
+    QString message = QString(
+        "%1 completed successfully!\n\n"
+        "Output: %2\n\n"
+        "Read    : %3 s\n"
+        "Prepare : %4 s\n"
+        "Compute : %5 s\n"
+        "Write   : %6 s\n"
+        "Total   : %7 s\n\n"
+        "Input   : %8\n"
+        "Output  : %9\n"
+        "Speed   : %10 MB/s (%11 GB/s)")
+        .arg(opName)
+        .arg(outputPath)
+        .arg(stats.read_sec,    0, 'f', 3)
+        .arg(stats.prepare_sec, 0, 'f', 3)
+        .arg(stats.compute_sec, 0, 'f', 3)
+        .arg(stats.write_sec,   0, 'f', 3)
+        .arg(stats.total_sec,   0, 'f', 3)
+        .arg(fmtBytes(stats.input_bytes))
+        .arg(fmtBytes(stats.output_bytes))
+        .arg(stats.throughput_mbps, 0, 'f', 2)
+        .arg(stats.throughput_gbps, 0, 'f', 2);
+
+    if (isCompression) {
+        message += QString("\nRatio   : %1x").arg(stats.ratio, 0, 'f', 2);
     }
     
     QMessageBox::information(this, tr("Success"), message);
-    
-    statusBar()->showMessage(tr("Operation completed in %1").arg(durationText), 5000);
+
+    QString shortSummary = QString("%1 done in %2 s @ %3 MB/s")
+                               .arg(opName)
+                               .arg(stats.total_sec, 0, 'f', 2)
+                               .arg(stats.throughput_mbps, 0, 'f', 1);
+    statusBar()->showMessage(shortSummary, 8000);
 }
 
 void MainWindow::onWorkerError(const QString &errorMessage)
@@ -886,9 +857,12 @@ void MainWindow::onWorkerError(const QString &errorMessage)
     ui->buttonCompress->setText("🗜️ Compress");
     ui->buttonCompress->setToolTip("Compress selected files");
     ui->buttonCompress->setEnabled(true);
-    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
     ui->buttonClearFiles->setEnabled(true);
     ui->buttonClearSelected->setEnabled(true);
+
+    if (m_gpuMonitor && m_gpuMonitor->isVisible()) {
+        m_gpuMonitor->startAutoRefresh();
+    }
     
     // Show error message
     QMessageBox::critical(this, tr("Error"), 
@@ -904,9 +878,12 @@ void MainWindow::onWorkerCanceled()
     ui->buttonCompress->setText("🗜️ Compress");
     ui->buttonCompress->setToolTip("Compress selected files");
     ui->buttonCompress->setEnabled(true);
-    // ui->buttonDecompress->setEnabled(true);  // Hidden - archive creation window
     ui->buttonClearFiles->setEnabled(true);
     ui->buttonClearSelected->setEnabled(true);
+
+    if (m_gpuMonitor && m_gpuMonitor->isVisible()) {
+        m_gpuMonitor->startAutoRefresh();
+    }
     
     QMessageBox::information(this, tr("Canceled"), tr("Operation was canceled."));
     
@@ -1090,76 +1067,6 @@ void MainWindow::onGPUMonitorTriggered()
     m_gpuMonitor->activateWindow();
 }
 
-void MainWindow::onTotalBlocksChanged(int total)
-{
-    // DISABLED - Block Progress Widget (Work in Progress)
-    // TODO: Re-enable once block progress visualization is stable
-    /*
-    // Create progress widget dialog on demand
-    if (!m_progressWidget) {
-        m_progressWidget = new ProgressWidget(nullptr);  // Top-level window
-        m_progressWidget->setWindowTitle("*** WORK IN PROGRESS *** Block Progress - nvCOMP");
-        m_progressWidget->setWindowFlags(Qt::Dialog);
-        m_progressWidget->resize(800, 600);
-    }
-    
-    m_progressWidget->setTotalBlocks(total);
-    m_progressWidget->show();
-    m_progressWidget->raise();
-    */
-    
-    // Debug output
-    qDebug() << "Total blocks set:" << total;
-}
-
-void MainWindow::onBlockProgressChanged(int block, float progress)
-{
-    // DISABLED - Block Progress Widget (Work in Progress)
-    /*
-    if (m_progressWidget) {
-        m_progressWidget->updateBlockProgress(block, progress);
-    }
-    */
-    qDebug() << "Block" << block << "progress:" << (progress * 100) << "%";
-}
-
-void MainWindow::onBlockCompleted(int block, float ratio)
-{
-    // DISABLED - Block Progress Widget (Work in Progress)
-    /*
-    if (m_progressWidget) {
-        m_progressWidget->setBlockComplete(block, ratio);
-    }
-    */
-    qDebug() << "Block" << block << "completed with ratio:" << ratio;
-}
-
-void MainWindow::onThroughputChanged(double mbps)
-{
-    // DISABLED - Block Progress Widget (Work in Progress)
-    /*
-    if (m_progressWidget) {
-        m_progressWidget->updateThroughput(mbps);
-    }
-    */
-    
-    // Update status bar with throughput
-    statusBar()->showMessage(QString("Speed: %1 MB/s").arg(mbps, 0, 'f', 2));
-}
-
-void MainWindow::onStageChanged(const QString &stage)
-{
-    // Store the current stage
-    m_currentStage = stage;
-    
-    // DISABLED - Block Progress Widget (Work in Progress)
-    /*
-    if (m_progressWidget) {
-        m_progressWidget->setCurrentStage(stage);
-    }
-    */
-}
-
 void MainWindow::onVRAMLowWarning(int deviceIndex, float percentFree)
 {
     // Show warning in status bar
@@ -1294,11 +1201,8 @@ void MainWindow::startDecompressionFromCommandLine(const QString &outputDir)
     if (!m_worker) {
         m_worker = new CompressionWorker(this);
         
-        // Connect signals (similar to onDecompressClicked)
-        connect(m_worker, &CompressionWorker::progressChanged,
-                this, &MainWindow::onWorkerProgress);
-        connect(m_worker, &CompressionWorker::progressDetails,
-                this, &MainWindow::onWorkerProgressDetails);
+        connect(m_worker, &CompressionWorker::progressUpdate,
+                this, &MainWindow::onProgressUpdate);
         connect(m_worker, &CompressionWorker::finished,
                 this, &MainWindow::onWorkerFinished);
         connect(m_worker, &CompressionWorker::error,
@@ -1307,18 +1211,10 @@ void MainWindow::startDecompressionFromCommandLine(const QString &outputDir)
                 this, &MainWindow::onWorkerCanceled);
         connect(m_worker, &CompressionWorker::statusMessage,
                 this, &MainWindow::onWorkerStatusMessage);
-        
-        // Connect block-level progress signals
-        connect(m_worker, &CompressionWorker::totalBlocksChanged,
-                this, &MainWindow::onTotalBlocksChanged);
-        connect(m_worker, &CompressionWorker::blockProgressChanged,
-                this, &MainWindow::onBlockProgressChanged);
-        connect(m_worker, &CompressionWorker::blockCompleted,
-                this, &MainWindow::onBlockCompleted);
-        connect(m_worker, &CompressionWorker::throughputChanged,
-                this, &MainWindow::onThroughputChanged);
-        connect(m_worker, &CompressionWorker::stageChanged,
-                this, &MainWindow::onStageChanged);
+    }
+    
+    if (m_gpuMonitor) {
+        m_gpuMonitor->stopAutoRefresh();
     }
     
     // Setup and start decompression

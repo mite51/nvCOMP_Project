@@ -6,8 +6,12 @@
 #include "compression_worker.h"
 #include <QFileInfo>
 #include <QDir>
+#include <QDirIterator>
+#include <QMetaType>
 #include <QDebug>
-#include <algorithm>
+#include <cstring>
+#include <vector>
+#include <string>
 
 CompressionWorker::CompressionWorker(QObject *parent)
     : QThread(parent)
@@ -15,72 +19,62 @@ CompressionWorker::CompressionWorker(QObject *parent)
     , m_useCpuMode(false)
     , m_volumeSize(0)
     , m_canceled(0)
-    , m_totalBytes(0)
-    , m_processedBytes(0)
     , m_finalElapsedMs(0)
-    , m_operationHandle(nullptr)
+    , m_lastEmittedPercent(-1)
+    , m_lastEmittedStage()
 {
+    // Register the stats struct as a Qt metatype so it can cross threads via
+    // queued signals. Calling qRegisterMetaType is idempotent.
+    qRegisterMetaType<nvcomp_compression_stats_t>("nvcomp_compression_stats_t");
 }
 
 CompressionWorker::~CompressionWorker()
 {
-    // Ensure thread is stopped before destruction
     if (isRunning()) {
         cancel();
-        // Wait up to 5 seconds for thread to finish
         if (!wait(5000)) {
-            // Thread didn't finish gracefully, force terminate
             terminate();
-            wait();  // Wait for termination to complete
+            wait();
         }
-    }
-
-    // Clean up operation handle if it exists
-    if (m_operationHandle) {
-        nvcomp_destroy_operation_handle(m_operationHandle);
-        m_operationHandle = nullptr;
     }
 }
 
-void CompressionWorker::setupCompress(const QStringList &files,
-                                     const QString &outputPath,
-                                     const QString &algorithm,
-                                     bool useCpuMode,
-                                     uint64_t volumeSize)
+void CompressionWorker::setupCompress(const QStringList &paths,
+                                      const QString &outputPath,
+                                      const QString &algorithm,
+                                      bool useCpuMode,
+                                      uint64_t volumeSize)
 {
     QMutexLocker locker(&m_mutex);
     m_operationType = COMPRESS;
-    m_inputFiles = files;
+    m_inputPaths = paths;
     m_outputPath = outputPath;
     m_algorithm = algorithm;
     m_useCpuMode = useCpuMode;
     m_volumeSize = volumeSize;
     m_canceled = 0;
-    m_totalBytes = calculateTotalSize();
-    m_processedBytes = 0;
+    m_finalElapsedMs = 0;
 }
 
 void CompressionWorker::setupDecompress(const QStringList &files,
-                                       const QString &outputPath,
-                                       const QString &algorithm,
-                                       bool useCpuMode)
+                                        const QString &outputPath,
+                                        const QString &algorithm,
+                                        bool useCpuMode)
 {
     QMutexLocker locker(&m_mutex);
     m_operationType = DECOMPRESS;
-    m_inputFiles = files;
+    m_inputPaths = files;
     m_outputPath = outputPath;
     m_algorithm = algorithm;
     m_useCpuMode = useCpuMode;
     m_volumeSize = 0;
     m_canceled = 0;
-    m_totalBytes = calculateTotalSize();
-    m_processedBytes = 0;
+    m_finalElapsedMs = 0;
 }
 
 void CompressionWorker::cancel()
 {
     m_canceled = 1;
-    qDebug() << "Cancellation requested";
 }
 
 bool CompressionWorker::isCanceled() const
@@ -94,20 +88,16 @@ qint64 CompressionWorker::getElapsedTime() const
         auto now = std::chrono::steady_clock::now();
         return std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime).count();
     }
-    // Return final elapsed time if operation has completed
     return m_finalElapsedMs;
 }
 
 void CompressionWorker::run()
 {
     m_startTime = std::chrono::steady_clock::now();
-    
-    // Create operation handle for progress tracking
-    m_operationHandle = nvcomp_create_operation_handle();
-    if (m_operationHandle) {
-        nvcomp_set_progress_callback(m_operationHandle, progressCallback, this);
-        nvcomp_set_block_progress_callback(m_operationHandle, blockProgressCallback, this);
-    }
+    // Reset throttle state for this run (do NOT use process statics).
+    m_lastEmittedPercent = -1;
+    m_lastEmittedStage.clear();
+    m_lastEmitTime = std::chrono::steady_clock::time_point::min();
 
     try {
         if (m_operationType == COMPRESS) {
@@ -121,21 +111,17 @@ void CompressionWorker::run()
         emit error("Unknown error occurred");
     }
 
-    // Clean up operation handle
-    if (m_operationHandle) {
-        nvcomp_destroy_operation_handle(m_operationHandle);
-        m_operationHandle = nullptr;
-    }
+    auto endTime = std::chrono::steady_clock::now();
+    m_finalElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           endTime - m_startTime).count();
 }
 
 void CompressionWorker::performCompress()
 {
-    if (m_inputFiles.isEmpty()) {
+    if (m_inputPaths.isEmpty()) {
         emit error("No files selected for compression");
         return;
     }
-
-    emit statusMessage("Starting compression...");
 
     nvcomp_algorithm_t algo = algorithmStringToEnum(m_algorithm);
     if (algo == NVCOMP_ALGO_UNKNOWN) {
@@ -143,12 +129,11 @@ void CompressionWorker::performCompress()
         return;
     }
 
-    // Determine output path
+    // Resolve output path. Match the CLI's defaulting behavior for parity.
     QString outputFile = m_outputPath;
     if (outputFile.isEmpty()) {
-        // Auto-generate output filename
-        QFileInfo firstFile(m_inputFiles.first());
-        if (m_inputFiles.size() == 1) {
+        QFileInfo firstFile(m_inputPaths.first());
+        if (m_inputPaths.size() == 1) {
             outputFile = firstFile.absolutePath() + "/" + firstFile.baseName() + ".nvcomp";
         } else {
             outputFile = firstFile.absolutePath() + "/archive.nvcomp";
@@ -157,118 +142,91 @@ void CompressionWorker::performCompress()
 
     emit statusMessage(QString("Output: %1").arg(outputFile));
 
-    // Calculate total size
-    uint64_t totalUncompressedSize = 0;
-    for (const QString &filePath : m_inputFiles) {
-        QFileInfo fileInfo(filePath);
-        if (fileInfo.isFile()) {
-            totalUncompressedSize += fileInfo.size();
-        }
-    }
-
-    // Compress files (single or multiple)
     if (isCanceled()) {
         emit canceled();
         return;
     }
 
-    if (m_inputFiles.size() == 1) {
-        emit statusMessage(QString("Compressing: %1").arg(QFileInfo(m_inputFiles.first()).fileName()));
+    if (m_inputPaths.size() == 1) {
+        emit statusMessage(QString("Compressing: %1")
+                               .arg(QFileInfo(m_inputPaths.first()).fileName()));
     } else {
-        emit statusMessage(QString("Compressing %1 files...").arg(m_inputFiles.size()));
+        emit statusMessage(QString("Compressing %1 items...").arg(m_inputPaths.size()));
     }
-    
-    // Progress will be reported by block progress callbacks from the core library
-    nvcomp_error_t result;
-    
-    // Convert QString to std::string ONCE and keep them in scope
-    std::string inputPathStr;
+
+    // Set up the operation handle once. The throttling lives in the core
+    // (makeThrottledCallback wraps our callback there), so we do NOT need to
+    // re-throttle here - we can deliver every call straight to the UI signal.
+    nvcomp_operation_handle handle = nvcomp_create_operation_handle();
+    if (handle) {
+        nvcomp_set_block_progress_callback(handle, &CompressionWorker::blockProgressCallback, this);
+    }
+
+    nvcomp_compression_stats_t stats;
+    std::memset(&stats, 0, sizeof(stats));
+
+    // Convert input paths to UTF-8 ONCE and keep them in scope for the duration
+    // of the call.
     std::string outputFileStr = outputFile.toStdString();
-    
-    // Use file list API for multiple files, or single file API for one file
-    if (m_inputFiles.size() == 1) {
-        inputPathStr = m_inputFiles.first().toStdString();
-        
-        // Single file - use original single-file API
+
+    nvcomp_error_t result = NVCOMP_SUCCESS;
+
+    if (m_inputPaths.size() == 1) {
+        // Single path (file OR folder) - use the same single-path API the CLI
+        // uses. The core handles directories internally.
+        std::string inputPathStr = m_inputPaths.first().toStdString();
+
         if (m_useCpuMode) {
-            result = nvcomp_compress_cpu(
-                m_operationHandle,
-                algo,
-                inputPathStr.c_str(),
-                outputFileStr.c_str(),
-                m_volumeSize
-            );
+            result = nvcomp_compress_cpu(handle, algo,
+                                          inputPathStr.c_str(), outputFileStr.c_str(),
+                                          m_volumeSize, &stats);
+        } else if (nvcomp_is_cross_compatible(algo)) {
+            result = nvcomp_compress_gpu_batched(handle, algo,
+                                                  inputPathStr.c_str(), outputFileStr.c_str(),
+                                                  m_volumeSize, &stats);
         } else {
-            if (nvcomp_is_cross_compatible(algo)) {
-                result = nvcomp_compress_gpu_batched(
-                    m_operationHandle,
-                    algo,
-                    inputPathStr.c_str(),
-                    outputFileStr.c_str(),
-                    m_volumeSize
-                );
-            } else {
-                result = nvcomp_compress_gpu_manager(
-                    m_operationHandle,
-                    algo,
-                    inputPathStr.c_str(),
-                    outputFileStr.c_str(),
-                    m_volumeSize
-                );
-            }
+            result = nvcomp_compress_gpu_manager(handle, algo,
+                                                  inputPathStr.c_str(), outputFileStr.c_str(),
+                                                  m_volumeSize, &stats);
         }
     } else {
-        // Multiple files - use file list API
-        // Convert QStringList to std::vector<std::string> and then to const char**
+        // Multiple paths - use file-list API.
         std::vector<std::string> filePathStrings;
-        std::vector<const char*> filePaths;
-        filePathStrings.reserve(m_inputFiles.size());
-        filePaths.reserve(m_inputFiles.size());
-        
-        for (const QString &filePath : m_inputFiles) {
-            filePathStrings.push_back(filePath.toStdString());
+        std::vector<const char *> filePaths;
+        filePathStrings.reserve(m_inputPaths.size());
+        filePaths.reserve(m_inputPaths.size());
+
+        for (const QString &p : m_inputPaths) {
+            filePathStrings.push_back(p.toStdString());
         }
-        
-        for (const std::string &pathStr : filePathStrings) {
-            filePaths.push_back(pathStr.c_str());
+        for (const std::string &s : filePathStrings) {
+            filePaths.push_back(s.c_str());
         }
-        
+
         if (m_useCpuMode) {
-            result = nvcomp_compress_cpu_file_list(
-                m_operationHandle,
-                algo,
-                filePaths.data(),
-                filePaths.size(),
-                outputFileStr.c_str(),
-                m_volumeSize
-            );
+            result = nvcomp_compress_cpu_file_list(handle, algo,
+                                                    filePaths.data(), filePaths.size(),
+                                                    outputFileStr.c_str(),
+                                                    m_volumeSize, &stats);
+        } else if (nvcomp_is_cross_compatible(algo)) {
+            result = nvcomp_compress_gpu_batched_file_list(handle, algo,
+                                                            filePaths.data(), filePaths.size(),
+                                                            outputFileStr.c_str(),
+                                                            m_volumeSize, &stats);
         } else {
-            if (nvcomp_is_cross_compatible(algo)) {
-                result = nvcomp_compress_gpu_batched_file_list(
-                    m_operationHandle,
-                    algo,
-                    filePaths.data(),
-                    filePaths.size(),
-                    outputFileStr.c_str(),
-                    m_volumeSize
-                );
-            } else {
-                result = nvcomp_compress_gpu_manager_file_list(
-                    m_operationHandle,
-                    algo,
-                    filePaths.data(),
-                    filePaths.size(),
-                    outputFileStr.c_str(),
-                    m_volumeSize
-                );
-            }
+            result = nvcomp_compress_gpu_manager_file_list(handle, algo,
+                                                            filePaths.data(), filePaths.size(),
+                                                            outputFileStr.c_str(),
+                                                            m_volumeSize, &stats);
         }
     }
 
-    // Check result (progress is reported by block progress callbacks)
+    if (handle) nvcomp_destroy_operation_handle(handle);
+
     if (result != NVCOMP_SUCCESS) {
-        const char* errorMsg = nvcomp_get_last_error();
-        emit error(QString("Compression failed: %1").arg(errorMsg ? errorMsg : "Unknown error"));
+        const char *errorMsg = nvcomp_get_last_error();
+        emit error(QString("Compression failed: %1")
+                       .arg(errorMsg && *errorMsg ? errorMsg : "Unknown error"));
         return;
     }
 
@@ -277,59 +235,53 @@ void CompressionWorker::performCompress()
         return;
     }
 
-    // Calculate compression ratio
-    QFileInfo outputInfo(outputFile);
-    double compressionRatio = 0.0;
-    if (totalUncompressedSize > 0 && outputInfo.exists()) {
-        compressionRatio = static_cast<double>(outputInfo.size()) / static_cast<double>(totalUncompressedSize);
-    }
-
-    auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - m_startTime);
-    
-    // Store final elapsed time
-    m_finalElapsedMs = duration.count();
-
-    emit progressChanged(100, "Complete");
-    emit finished(outputFile, compressionRatio, duration.count());
+    // Final 100% progress, then finished.
+    qint64 elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - m_startTime).count();
+    emit progressUpdate(100, QStringLiteral("complete"),
+                        stats.throughput_mbps, elapsed);
+    emit finished(outputFile, stats);
 }
 
 void CompressionWorker::performDecompress()
 {
-    if (m_inputFiles.isEmpty()) {
+    if (m_inputPaths.isEmpty()) {
         emit error("No files selected for decompression");
         return;
     }
 
-    emit statusMessage("Starting decompression...");
-
-    // Determine output path
     QString outputPath = m_outputPath;
     if (outputPath.isEmpty()) {
-        // Use same directory as input file
-        QFileInfo inputInfo(m_inputFiles.first());
-        outputPath = inputInfo.absolutePath();
+        outputPath = QFileInfo(m_inputPaths.first()).absolutePath();
     }
-
     emit statusMessage(QString("Output directory: %1").arg(outputPath));
 
-    // Process each file
-    for (const QString &inputFile : m_inputFiles) {
+    nvcomp_operation_handle handle = nvcomp_create_operation_handle();
+    if (handle) {
+        nvcomp_set_block_progress_callback(handle, &CompressionWorker::blockProgressCallback, this);
+    }
+
+    // Aggregate stats across all input archives.
+    nvcomp_compression_stats_t aggStats;
+    std::memset(&aggStats, 0, sizeof(aggStats));
+
+    for (int idx = 0; idx < m_inputPaths.size(); ++idx) {
         if (isCanceled()) {
+            if (handle) nvcomp_destroy_operation_handle(handle);
             emit canceled();
             return;
         }
 
+        const QString &inputFile = m_inputPaths.at(idx);
         QFileInfo fileInfo(inputFile);
         emit statusMessage(QString("Decompressing: %1").arg(fileInfo.fileName()));
-        emit progressChanged(0, fileInfo.fileName());
 
-        // Detect algorithm if not specified
         nvcomp_algorithm_t algo = NVCOMP_ALGO_UNKNOWN;
         if (!m_algorithm.isEmpty()) {
             algo = algorithmStringToEnum(m_algorithm);
         } else {
-            algo = nvcomp_detect_algorithm_from_file(inputFile.toStdString().c_str());
+            std::string fp = inputFile.toStdString();
+            algo = nvcomp_detect_algorithm_from_file(fp.c_str());
         }
 
         if (algo == NVCOMP_ALGO_UNKNOWN) {
@@ -337,223 +289,108 @@ void CompressionWorker::performDecompress()
             continue;
         }
 
-        // Construct output path
-        QString outputFilePath = outputPath + "/" + fileInfo.completeBaseName();
+        std::string inputFileStr = inputFile.toStdString();
+        std::string outputPathStr = outputPath.toStdString();
+
+        nvcomp_compression_stats_t stats;
+        std::memset(&stats, 0, sizeof(stats));
 
         nvcomp_error_t result;
         if (m_useCpuMode) {
-            result = nvcomp_decompress_cpu(
-                m_operationHandle,
-                algo,
-                inputFile.toStdString().c_str(),
-                outputFilePath.toStdString().c_str()
-            );
+            result = nvcomp_decompress_cpu(handle, algo,
+                                            inputFileStr.c_str(), outputPathStr.c_str(),
+                                            &stats);
+        } else if (nvcomp_is_cross_compatible(algo)) {
+            result = nvcomp_decompress_gpu_batched(handle, algo,
+                                                    inputFileStr.c_str(), outputPathStr.c_str(),
+                                                    &stats);
         } else {
-            if (nvcomp_is_cross_compatible(algo)) {
-                result = nvcomp_decompress_gpu_batched(
-                    m_operationHandle,
-                    algo,
-                    inputFile.toStdString().c_str(),
-                    outputFilePath.toStdString().c_str()
-                );
-            } else {
-                result = nvcomp_decompress_gpu_manager(
-                    m_operationHandle,
-                    inputFile.toStdString().c_str(),
-                    outputFilePath.toStdString().c_str()
-                );
-            }
+            result = nvcomp_decompress_gpu_manager(handle,
+                                                    inputFileStr.c_str(), outputPathStr.c_str(),
+                                                    &stats);
         }
 
         if (result != NVCOMP_SUCCESS) {
-            const char* errorMsg = nvcomp_get_last_error();
+            const char *errorMsg = nvcomp_get_last_error();
             emit error(QString("Decompression failed for %1: %2")
-                      .arg(fileInfo.fileName())
-                      .arg(errorMsg ? errorMsg : "Unknown error"));
+                           .arg(fileInfo.fileName())
+                           .arg(errorMsg && *errorMsg ? errorMsg : "Unknown error"));
             continue;
         }
 
-        if (isCanceled()) {
-            emit canceled();
-            return;
-        }
+        // Accumulate.
+        aggStats.read_sec += stats.read_sec;
+        aggStats.prepare_sec += stats.prepare_sec;
+        aggStats.compute_sec += stats.compute_sec;
+        aggStats.write_sec += stats.write_sec;
+        aggStats.total_sec += stats.total_sec;
+        aggStats.input_bytes += stats.input_bytes;
+        aggStats.output_bytes += stats.output_bytes;
     }
 
-    auto endTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - m_startTime);
-    
-    // Store final elapsed time
-    m_finalElapsedMs = duration.count();
+    if (handle) nvcomp_destroy_operation_handle(handle);
 
-    emit progressChanged(100, "Complete");
-    emit finished(outputPath, 0.0, duration.count());
+    // Re-derive throughput/ratio from aggregated bytes & total time.
+    if (aggStats.total_sec > 0.0 && aggStats.input_bytes > 0) {
+        double mb = static_cast<double>(aggStats.input_bytes) / (1024.0 * 1024.0);
+        aggStats.throughput_mbps = mb / aggStats.total_sec;
+        aggStats.throughput_gbps = aggStats.throughput_mbps / 1024.0;
+    }
+    if (aggStats.output_bytes > 0) {
+        aggStats.ratio = static_cast<double>(aggStats.input_bytes)
+                       / static_cast<double>(aggStats.output_bytes);
+    }
+
+    qint64 elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - m_startTime).count();
+    emit progressUpdate(100, QStringLiteral("complete"),
+                        aggStats.throughput_mbps, elapsed);
+    emit finished(outputPath, aggStats);
 }
 
-void CompressionWorker::progressCallback(uint64_t current, uint64_t total, void* user_data)
+void CompressionWorker::blockProgressCallback(nvcomp_operation_handle /*handle*/,
+                                              const nvcomp_progress_info_t *info,
+                                              void *user_data)
 {
-    if (user_data) {
-        CompressionWorker* worker = static_cast<CompressionWorker*>(user_data);
-        worker->updateProgress(current, total);
-    }
-}
+    if (!user_data || !info) return;
+    auto *worker = static_cast<CompressionWorker *>(user_data);
 
-void CompressionWorker::blockProgressCallback(nvcomp_operation_handle handle,
-                                              const nvcomp_progress_info_t* info,
-                                              void* user_data)
-{
-    if (!user_data || !info) {
-        return;
-    }
-    
-    CompressionWorker* worker = static_cast<CompressionWorker*>(user_data);
-    
-    if (worker->isCanceled()) {
-        return;
-    }
-    
-    // Emit block-level signals
-    static int lastTotalBlocks = -1;
-    if (info->totalBlocks != lastTotalBlocks) {
-        lastTotalBlocks = info->totalBlocks;
-        emit worker->totalBlocksChanged(info->totalBlocks);
-    }
-    
-    // Emit current block progress
-    if (info->currentBlock >= 0 && info->currentBlockProgress > 0.0f) {
-        emit worker->blockProgressChanged(info->currentBlock, info->currentBlockProgress);
-    }
-    
-    // Emit completed blocks (when a block reaches 100%)
-    static int lastCompletedBlocks = -1;
-    if (info->completedBlocks > lastCompletedBlocks) {
-        // A new block was completed
-        int newlyCompleted = info->completedBlocks - std::max(0, lastCompletedBlocks);
-        for (int i = 0; i < newlyCompleted; ++i) {
-            int blockIndex = lastCompletedBlocks + i + 1;
-            if (blockIndex < info->totalBlocks) {
-                // Use a default compression ratio estimate (will be improved in future)
-                emit worker->blockCompleted(blockIndex, 0.5f);
-            }
-        }
-        lastCompletedBlocks = info->completedBlocks;
-    }
-    
-    // Emit throughput
-    if (info->throughputMBps > 0.0) {
-        emit worker->throughputChanged(info->throughputMBps);
-    }
-    
-    // Emit stage changes
-    if (info->stage) {
-        QString stage = QString::fromUtf8(info->stage);
-        static QString lastStage;
-        if (stage != lastStage) {
-            lastStage = stage;
-            emit worker->stageChanged(stage);
-        }
-    }
-    
-    // Also emit overall progress
-    if (info->overallProgress >= 0.0f) {
-        worker->updateProgress(
-            static_cast<uint64_t>(info->overallProgress * worker->m_totalBytes),
-            worker->m_totalBytes
-        );
-    }
-}
+    if (worker->isCanceled()) return;
 
-void CompressionWorker::updateProgress(uint64_t current, uint64_t total)
-{
-    if (isCanceled()) {
-        return;
-    }
+    // The core already throttles us to ~30Hz / 1% pct. Apply a second
+    // throttle here aimed at the UI: cap to ~10Hz unless the percent or stage
+    // changed. This keeps the Qt event queue calm even if the core's throttle
+    // ever loosens.
+    const auto now = std::chrono::steady_clock::now();
+    const int pct = std::max(0, std::min(100,
+                       static_cast<int>(info->overallProgress * 100.0f)));
+    const QString stage = info->stage ? QString::fromUtf8(info->stage) : QString();
 
-    m_processedBytes = current;
-    m_totalBytes = total;
+    const bool isTerminal = info->overallProgress >= 1.0f;
+    const bool stageChanged = stage != worker->m_lastEmittedStage;
+    const bool pctChanged = pct != worker->m_lastEmittedPercent;
+    const bool timeOk = (now - worker->m_lastEmitTime) >= std::chrono::milliseconds(100);
 
-    // Calculate percentage
-    int percentage = 0;
-    if (total > 0) {
-        percentage = static_cast<int>((current * 100) / total);
-    }
+    if (!(isTerminal || stageChanged || (pctChanged && timeOk))) return;
 
-    // Calculate speed and ETA
-    double speedMBps = calculateSpeed();
-    int etaSeconds = estimateTimeRemaining();
+    worker->m_lastEmittedPercent = pct;
+    worker->m_lastEmittedStage = stage;
+    worker->m_lastEmitTime = now;
 
-    // Emit progress signals
-    emit progressChanged(percentage, QString());
-    emit progressDetails(current, total, speedMBps, etaSeconds);
-}
+    qint64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           now - worker->m_startTime).count();
 
-double CompressionWorker::calculateSpeed() const
-{
-    auto currentTime = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - m_startTime);
-    
-    if (elapsed.count() == 0) {
-        return 0.0;
-    }
-
-    // Speed in MB/s
-    double seconds = elapsed.count() / 1000.0;
-    double megabytes = m_processedBytes / (1024.0 * 1024.0);
-    return megabytes / seconds;
-}
-
-int CompressionWorker::estimateTimeRemaining() const
-{
-    if (m_processedBytes == 0 || m_totalBytes == 0) {
-        return 0;
-    }
-
-    auto currentTime = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - m_startTime);
-    
-    if (elapsed.count() == 0) {
-        return 0;
-    }
-
-    // Estimate based on current progress
-    uint64_t remaining = m_totalBytes - m_processedBytes;
-    double ratio = static_cast<double>(remaining) / static_cast<double>(m_processedBytes);
-    int etaSeconds = static_cast<int>(elapsed.count() * ratio);
-
-    return etaSeconds;
+    emit worker->progressUpdate(pct, stage, info->throughputMBps, elapsedMs);
 }
 
 nvcomp_algorithm_t CompressionWorker::algorithmStringToEnum(const QString &algorithm) const
 {
     QString algoLower = algorithm.toLower();
-    
-    if (algoLower == "lz4") return NVCOMP_ALGO_LZ4;
-    if (algoLower == "snappy") return NVCOMP_ALGO_SNAPPY;
-    if (algoLower == "zstd") return NVCOMP_ALGO_ZSTD;
+    if (algoLower == "lz4")      return NVCOMP_ALGO_LZ4;
+    if (algoLower == "snappy")   return NVCOMP_ALGO_SNAPPY;
+    if (algoLower == "zstd")     return NVCOMP_ALGO_ZSTD;
     if (algoLower == "gdeflate") return NVCOMP_ALGO_GDEFLATE;
-    if (algoLower == "ans") return NVCOMP_ALGO_ANS;
-    if (algoLower == "bitcomp") return NVCOMP_ALGO_BITCOMP;
-    
+    if (algoLower == "ans")      return NVCOMP_ALGO_ANS;
+    if (algoLower == "bitcomp")  return NVCOMP_ALGO_BITCOMP;
     return NVCOMP_ALGO_UNKNOWN;
 }
-
-uint64_t CompressionWorker::calculateTotalSize() const
-{
-    uint64_t totalSize = 0;
-    
-    for (const QString &filePath : m_inputFiles) {
-        QFileInfo fileInfo(filePath);
-        if (fileInfo.isFile()) {
-            totalSize += fileInfo.size();
-        } else if (fileInfo.isDir()) {
-            // Recursively calculate directory size
-            QDir dir(filePath);
-            QFileInfoList fileList = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot, QDir::NoSort);
-            for (const QFileInfo &file : fileList) {
-                totalSize += file.size();
-            }
-        }
-    }
-    
-    return totalSize;
-}
-
