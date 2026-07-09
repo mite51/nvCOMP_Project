@@ -401,6 +401,37 @@ static std::vector<fs::path> collectFiles(const fs::path& dirPath) {
 // Entry Enumeration (for streaming pipeline)
 // ============================================================================
 
+// Capture POSIX permission bits and mtime (ns since the unix epoch) for a
+// file. Best-effort: any failure leaves the fields at 0 ("unknown"), which
+// extractors treat as "use defaults / leave mtime alone".
+static void captureFileMetadata(const fs::path& p, uint32_t& mode, uint64_t& mtimeNs) {
+    mode = 0;
+    mtimeNs = 0;
+#ifndef _WIN32
+    struct stat st {};
+    if (::stat(p.c_str(), &st) == 0) {
+        mode = static_cast<uint32_t>(st.st_mode & 07777);
+        if (st.st_mtim.tv_sec > 0) {
+            mtimeNs = static_cast<uint64_t>(st.st_mtim.tv_sec) * 1000000000ull
+                    + static_cast<uint64_t>(st.st_mtim.tv_nsec);
+        }
+    }
+#else
+    // Windows has no POSIX mode bits (mode stays 0 = unknown); capture mtime
+    // via std::filesystem with a file_clock -> system_clock offset conversion
+    // (C++17 has no clock_cast).
+    std::error_code ec;
+    auto ft = fs::last_write_time(p, ec);
+    if (!ec) {
+        using namespace std::chrono;
+        auto sys = system_clock::now() + duration_cast<system_clock::duration>(
+            ft - fs::file_time_type::clock::now());
+        auto ns = duration_cast<nanoseconds>(sys.time_since_epoch()).count();
+        if (ns > 0) mtimeNs = static_cast<uint64_t>(ns);
+    }
+#endif
+}
+
 std::vector<ArchiveEntry> collectArchiveEntries(const std::string& folderOrFile) {
     std::vector<ArchiveEntry> entries;
     fs::path p(folderOrFile);
@@ -414,6 +445,7 @@ std::vector<ArchiveEntry> collectArchiveEntries(const std::string& folderOrFile)
         e.filePath = p;
         e.relativePath = p.filename().string();
         e.fileSize = fs::file_size(p);
+        captureFileMetadata(p, e.mode, e.mtimeNs);
         entries.push_back(std::move(e));
         return entries;
     }
@@ -432,6 +464,7 @@ std::vector<ArchiveEntry> collectArchiveEntries(const std::string& folderOrFile)
             e.relativePath = f.filename().string();
         }
         e.fileSize = fs::file_size(f);
+        captureFileMetadata(f, e.mode, e.mtimeNs);
         entries.push_back(std::move(e));
     }
     return entries;
@@ -455,6 +488,7 @@ std::vector<ArchiveEntry> collectArchiveEntriesFromList(const std::vector<std::s
                 e.relativePath = p.filename().string();
             }
             e.fileSize = fs::file_size(p);
+            captureFileMetadata(p, e.mode, e.mtimeNs);
             entries.push_back(std::move(e));
         } else if (fs::is_directory(p)) {
             auto files = collectFiles(p);
@@ -466,6 +500,7 @@ std::vector<ArchiveEntry> collectArchiveEntriesFromList(const std::vector<std::s
                     e.relativePath = f.filename().string();
                 }
                 e.fileSize = fs::file_size(f);
+                captureFileMetadata(f, e.mode, e.mtimeNs);
                 entries.push_back(std::move(e));
             }
         }
@@ -503,6 +538,8 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
         fs::path filePath;
         std::string relativePath;
         uint64_t fileSize;
+        uint32_t mode;
+        uint64_t mtimeNs;
     };
     std::vector<PreparedEntry> entries;
     entries.reserve(files.size());
@@ -515,9 +552,12 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
             relativePath = filePath.filename().string();
         }
         uint64_t fsize = fs::file_size(filePath);
+        uint32_t fmode = 0;
+        uint64_t fmtime = 0;
+        captureFileMetadata(filePath, fmode, fmtime);
         totalSize += fsize;
         totalArchiveSize += sizeof(FileEntry) + relativePath.size() + fsize;
-        entries.push_back({filePath, std::move(relativePath), fsize});
+        entries.push_back({filePath, std::move(relativePath), fsize, fmode, fmtime});
     }
     archiveData.reserve(totalArchiveSize);
 
@@ -539,8 +579,10 @@ std::vector<uint8_t> createArchiveFromFolder(const std::string& folderPath, Prog
 
         FileEntry entry;
         entry.pathLength = static_cast<uint32_t>(e.relativePath.length());
+        entry.mode = e.mode;
         entry.fileSize = e.fileSize;
-        
+        entry.mtimeNs = e.mtimeNs;
+
         const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
         archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
         archiveData.insert(archiveData.end(), e.relativePath.begin(), e.relativePath.end());
@@ -592,6 +634,9 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, Progress
 
     std::string filename = p.filename().string();
     uint64_t fileSize = fs::file_size(p);
+    uint32_t fileMode = 0;
+    uint64_t fileMtimeNs = 0;
+    captureFileMetadata(p, fileMode, fileMtimeNs);
 
     // Reserve once for header + entry + path + file data. No realloc.
     size_t totalArchiveSize = sizeof(ArchiveHeader)
@@ -613,8 +658,10 @@ std::vector<uint8_t> createArchiveFromFile(const std::string& filePath, Progress
     // Write file entry header + path
     FileEntry entry;
     entry.pathLength = static_cast<uint32_t>(filename.length());
+    entry.mode = fileMode;
     entry.fileSize = fileSize;
-    
+    entry.mtimeNs = fileMtimeNs;
+
     const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
     archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
     archiveData.insert(archiveData.end(), filename.begin(), filename.end());
@@ -700,6 +747,8 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
         fs::path filePath;
         std::string relativePath;
         uint64_t fileSize;
+        uint32_t mode;
+        uint64_t mtimeNs;
     };
     std::vector<PreparedEntry> entries;
     entries.reserve(allFiles.size());
@@ -712,9 +761,12 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
             relativePath = fileWithBase.filePath.filename().string();
         }
         uint64_t fsize = fs::file_size(fileWithBase.filePath);
+        uint32_t fmode = 0;
+        uint64_t fmtime = 0;
+        captureFileMetadata(fileWithBase.filePath, fmode, fmtime);
         totalSize += fsize;
         totalArchiveSize += sizeof(FileEntry) + relativePath.size() + fsize;
-        entries.push_back({fileWithBase.filePath, std::move(relativePath), fsize});
+        entries.push_back({fileWithBase.filePath, std::move(relativePath), fsize, fmode, fmtime});
     }
     archiveData.reserve(totalArchiveSize);
 
@@ -735,8 +787,10 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
 
         FileEntry entry;
         entry.pathLength = static_cast<uint32_t>(e.relativePath.length());
+        entry.mode = e.mode;
         entry.fileSize = e.fileSize;
-        
+        entry.mtimeNs = e.mtimeNs;
+
         const uint8_t* entryBytes = reinterpret_cast<const uint8_t*>(&entry);
         archiveData.insert(archiveData.end(), entryBytes, entryBytes + sizeof(FileEntry));
         archiveData.insert(archiveData.end(), e.relativePath.begin(), e.relativePath.end());
@@ -779,12 +833,47 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
 // Streaming archive extraction
 // ============================================================================
 
+// Apply stored metadata to an already-written file. mode == 0 / mtimeNs == 0
+// mean "unknown" and are skipped. Best-effort: failures are ignored (the file
+// contents are already correct; metadata is not worth failing extraction for).
+static void applyFileMetadata(const fs::path& path, uint32_t mode, uint64_t mtimeNs) {
+#ifndef _WIN32
+    if (mode != 0) {
+        ::chmod(path.c_str(), static_cast<mode_t>(mode & 07777));
+    }
+    if (mtimeNs != 0) {
+        timespec times[2];
+        times[0].tv_sec = 0;
+        times[0].tv_nsec = UTIME_OMIT;   // leave atime alone
+        times[1].tv_sec = static_cast<time_t>(mtimeNs / 1000000000ull);
+        times[1].tv_nsec = static_cast<long>(mtimeNs % 1000000000ull);
+        ::utimensat(AT_FDCWD, path.c_str(), times, 0);
+    }
+#else
+    (void)mode; // no POSIX permission bits on Windows
+    if (mtimeNs != 0) {
+        using namespace std::chrono;
+        // system_clock -> file_clock offset conversion (C++17, no clock_cast)
+        auto sysTp = system_clock::time_point(duration_cast<system_clock::duration>(
+            nanoseconds(mtimeNs)));
+        auto ft = fs::file_time_type::clock::now() +
+            duration_cast<fs::file_time_type::duration>(sysTp - system_clock::now());
+        std::error_code ec;
+        fs::last_write_time(path, ft, ec);
+    }
+#endif
+}
+
 // Lean single-shot file write for extraction workers. On POSIX this is plain
 // open/write/close (measured ~equal to ofstream single-threaded but scales to
 // ~4x with 8 workers); elsewhere it falls back to the existing writeFile.
-static void writeFileFast(const fs::path& path, const uint8_t* data, size_t n) {
+// Applies stored permissions/mtime after the data is written (fchmod, not the
+// open() mode argument, so the process umask cannot strip bits).
+static void writeFileFast(const fs::path& path, const uint8_t* data, size_t n,
+                          uint32_t mode, uint64_t mtimeNs) {
 #ifdef _WIN32
     writeFile(path, data, n);
+    applyFileMetadata(path, mode, mtimeNs);
 #else
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
@@ -798,6 +887,17 @@ static void writeFileFast(const fs::path& path, const uint8_t* data, size_t n) {
             throw std::runtime_error("Failed to write output file: " + path.string());
         }
         off += static_cast<size_t>(w);
+    }
+    if (mode != 0) {
+        ::fchmod(fd, static_cast<mode_t>(mode & 07777));
+    }
+    if (mtimeNs != 0) {
+        timespec times[2];
+        times[0].tv_sec = 0;
+        times[0].tv_nsec = UTIME_OMIT;
+        times[1].tv_sec = static_cast<time_t>(mtimeNs / 1000000000ull);
+        times[1].tv_nsec = static_cast<long>(mtimeNs % 1000000000ull);
+        ::futimens(fd, times);
     }
     ::close(fd);
 #endif
@@ -817,6 +917,8 @@ struct ArchiveExtractor::Impl {
         fs::path path;
         const uint8_t* data;
         size_t n;
+        uint32_t mode;
+        uint64_t mtimeNs;
         std::shared_ptr<FeedGuard> guard;
     };
 
@@ -863,7 +965,7 @@ struct ArchiveExtractor::Impl {
                 if (header_.magic != ARCHIVE_MAGIC) {
                     throw std::runtime_error("Invalid archive: bad magic number");
                 }
-                if (header_.version != ARCHIVE_VERSION) {
+                if (header_.version < 1 || header_.version > ARCHIVE_VERSION) {
                     throw std::runtime_error("Unsupported archive version");
                 }
                 if (verbose_) {
@@ -877,9 +979,21 @@ struct ArchiveExtractor::Impl {
                 break;
             }
             case State::Entry: {
-                const uint8_t* b = fill(sizeof(FileEntry), p, n);
+                // v1 entries are 16 bytes (no mode/mtime); v2 are 24 bytes.
+                const bool v1 = header_.version < 2;
+                const size_t entryBytes = v1 ? sizeof(FileEntryV1) : sizeof(FileEntry);
+                const uint8_t* b = fill(entryBytes, p, n);
                 if (!b) break;
-                std::memcpy(&entry_, b, sizeof(FileEntry));
+                if (v1) {
+                    FileEntryV1 e1;
+                    std::memcpy(&e1, b, sizeof(FileEntryV1));
+                    entry_.pathLength = e1.pathLength;
+                    entry_.mode = 0;
+                    entry_.fileSize = e1.fileSize;
+                    entry_.mtimeNs = 0;
+                } else {
+                    std::memcpy(&entry_, b, sizeof(FileEntry));
+                }
                 carry_.clear();
                 if (entry_.pathLength == 0 || entry_.pathLength > (1u << 20)) {
                     throw std::runtime_error("Invalid archive: bad path length");
@@ -899,7 +1013,7 @@ struct ArchiveExtractor::Impl {
                 fullPath_ = fs::path(outputPath_) / fs::path(rel);
                 makeParentDirs(fullPath_);
                 if (entry_.fileSize == 0) {
-                    dispatch(fullPath_, nullptr, 0, guard);
+                    dispatch(fullPath_, nullptr, 0, entry_.mode, entry_.mtimeNs, guard);
                     fileDone();
                 } else {
                     dataRemaining_ = entry_.fileSize;
@@ -912,7 +1026,7 @@ struct ArchiveExtractor::Impl {
                     std::min<uint64_t>(dataRemaining_, n));
                 if (!spanFile_.is_open() && take == dataRemaining_) {
                     // Whole (rest of) file inside this feed: pool-writable.
-                    dispatch(fullPath_, p, take, guard);
+                    dispatch(fullPath_, p, take, entry_.mode, entry_.mtimeNs, guard);
                 } else {
                     // File spans feeds: write inline through a kept-open
                     // stream (only large files hit this; no lifetime issues).
@@ -935,7 +1049,10 @@ struct ArchiveExtractor::Impl {
                 n -= take;
                 dataRemaining_ -= take;
                 if (dataRemaining_ == 0) {
-                    if (spanFile_.is_open()) spanFile_.close();
+                    if (spanFile_.is_open()) {
+                        spanFile_.close();
+                        applyFileMetadata(fullPath_, entry_.mode, entry_.mtimeNs);
+                    }
                     fileDone();
                 }
                 break;
@@ -967,9 +1084,10 @@ struct ArchiveExtractor::Impl {
     // ---- writing -----------------------------------------------------------
 
     void dispatch(const fs::path& path, const uint8_t* data, size_t n,
+                  uint32_t mode, uint64_t mtimeNs,
                   const std::shared_ptr<FeedGuard>& guard) {
         if (workers_.empty()) {
-            writeFileFast(path, data, n);
+            writeFileFast(path, data, n, mode, mtimeNs);
             bytesWritten_.fetch_add(n, std::memory_order_relaxed);
             filesWritten_.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -983,7 +1101,7 @@ struct ArchiveExtractor::Impl {
             checkWorkerError();
             return;
         }
-        tasks_.push_back(Task{path, data, n, guard});
+        tasks_.push_back(Task{path, data, n, mode, mtimeNs, guard});
         outstanding_++;
         lk.unlock();
         cvWork_.notify_one();
@@ -1002,7 +1120,7 @@ struct ArchiveExtractor::Impl {
             cvSpace_.notify_one();
             if (!abort_.load()) {
                 try {
-                    writeFileFast(t.path, t.data, t.n);
+                    writeFileFast(t.path, t.data, t.n, t.mode, t.mtimeNs);
                     bytesWritten_.fetch_add(t.n, std::memory_order_relaxed);
                     filesWritten_.fetch_add(1, std::memory_order_relaxed);
                 } catch (...) {
@@ -1144,24 +1262,35 @@ void listArchive(const std::vector<uint8_t>& archiveData) {
         throw std::runtime_error("Invalid archive: bad magic number");
     }
     
-    if (header.version != ARCHIVE_VERSION) {
+    if (header.version < 1 || header.version > ARCHIVE_VERSION) {
         throw std::runtime_error("Unsupported archive version");
     }
-    
+    const bool v1 = header.version < 2;
+    const size_t entryBytes = v1 ? sizeof(FileEntryV1) : sizeof(FileEntry);
+
     std::cout << "Archive contains " << header.fileCount << " file(s):" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
-    
+
     uint64_t totalSize = 0;
-    
+
     // List each file
     for (uint32_t i = 0; i < header.fileCount; i++) {
-        if (offset + sizeof(FileEntry) > archiveData.size()) {
+        if (offset + entryBytes > archiveData.size()) {
             throw std::runtime_error("Invalid archive: truncated file entry");
         }
-        
+
         FileEntry entry;
-        std::memcpy(&entry, archiveData.data() + offset, sizeof(FileEntry));
-        offset += sizeof(FileEntry);
+        if (v1) {
+            FileEntryV1 e1;
+            std::memcpy(&e1, archiveData.data() + offset, sizeof(FileEntryV1));
+            entry.pathLength = e1.pathLength;
+            entry.mode = 0;
+            entry.fileSize = e1.fileSize;
+            entry.mtimeNs = 0;
+        } else {
+            std::memcpy(&entry, archiveData.data() + offset, sizeof(FileEntry));
+        }
+        offset += entryBytes;
         
         if (offset + entry.pathLength + entry.fileSize > archiveData.size()) {
             throw std::runtime_error("Invalid archive: truncated file data");

@@ -116,14 +116,16 @@ private:
     bool installDesktopFile();
     bool installMimeTypes();
     bool installIcons();
+    bool installFileManagerIntegration();
     bool updateDesktopDatabase();
     bool updateMimeDatabase();
     bool updateIconCache();
-    
+
     // Uninstallation methods
     bool uninstallDesktopFile();
     bool uninstallMimeTypes();
     bool uninstallIcons();
+    bool uninstallFileManagerIntegration();
     
     // Helper methods
     QString getDesktopFilePath() const;

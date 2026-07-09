@@ -476,7 +476,9 @@ static void compressGPUBatchedStreaming(AlgoType algo,
                 if (abortFlag.load()) throw std::runtime_error("compression aborted");
                 FileEntry fe;
                 fe.pathLength = static_cast<uint32_t>(e.relativePath.size());
+                fe.mode = e.mode;
                 fe.fileSize = e.fileSize;
+                fe.mtimeNs = e.mtimeNs;
                 putBytes(reinterpret_cast<const uint8_t*>(&fe), sizeof(FileEntry));
                 putBytes(reinterpret_cast<const uint8_t*>(e.relativePath.data()),
                          e.relativePath.size());

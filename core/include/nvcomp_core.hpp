@@ -26,7 +26,9 @@ namespace nvcomp_core {
 
 constexpr size_t CHUNK_SIZE = 1 << 16; // 64KB
 constexpr uint32_t ARCHIVE_MAGIC = 0x4E564152; // "NVAR"
-constexpr uint32_t ARCHIVE_VERSION = 1;
+// v2 adds per-file POSIX permissions + mtime to FileEntry (16 -> 24 bytes).
+// Readers accept v1 and v2; writers emit v2.
+constexpr uint32_t ARCHIVE_VERSION = 2;
 constexpr uint32_t BATCHED_MAGIC = 0x4E564243; // "NVBC"
 constexpr uint32_t BATCHED_VERSION = 1;
 constexpr uint32_t VOLUME_MAGIC = 0x4E56564D; // "NVVM"
@@ -90,10 +92,24 @@ struct ArchiveHeader {
     uint32_t reserved;
 };
 
+// Archive v2 file entry: 24 bytes on the wire, no padding.
+// mode == 0 means "unknown" (extract with process defaults); mtimeNs == 0
+// means "unknown" (leave the extracted file's mtime alone).
 struct FileEntry {
+    uint32_t pathLength;
+    uint32_t mode;        // POSIX permission bits (st_mode & 07777)
+    uint64_t fileSize;
+    uint64_t mtimeNs;     // modification time, ns since the unix epoch
+};
+static_assert(sizeof(FileEntry) == 24, "FileEntry v2 wire size");
+
+// Archive v1 file entry layout (16 bytes incl. 4B padding), kept for reading
+// pre-v2 archives.
+struct FileEntryV1 {
     uint32_t pathLength;
     uint64_t fileSize;
 };
+static_assert(sizeof(FileEntryV1) == 16, "FileEntry v1 wire size");
 
 struct BatchedHeader {
     uint32_t magic;
@@ -236,6 +252,8 @@ struct ArchiveEntry {
     std::filesystem::path filePath;     // absolute / OS-native path on disk
     std::string relativePath;           // path stored inside the archive
     uint64_t fileSize;                  // cached fs::file_size(filePath)
+    uint32_t mode = 0;                  // POSIX permission bits; 0 = unknown
+    uint64_t mtimeNs = 0;               // mtime, ns since epoch; 0 = unknown
 };
 
 /**

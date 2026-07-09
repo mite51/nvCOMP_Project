@@ -37,12 +37,16 @@ bool DesktopIntegration::install()
     if (!installIcons()) {
         return false;
     }
-    
+
+    // Best-effort: file-manager context menus (Extract Here / Compress) come
+    // from the Nautilus python extension / Nemo script, not from MIME data.
+    installFileManagerIntegration();
+
     // Update databases
     updateDesktopDatabase();
     updateMimeDatabase();
     updateIconCache();
-    
+
     return true;
 }
 
@@ -63,13 +67,92 @@ bool DesktopIntegration::uninstall()
     if (!uninstallIcons()) {
         success = false;
     }
-    
+
+    uninstallFileManagerIntegration();
+
     // Update databases
     updateDesktopDatabase();
     updateMimeDatabase();
     updateIconCache();
-    
+
     return success;
+}
+
+// ============================================================================
+// File-manager context menus (Nautilus python extension / Nemo script)
+// ============================================================================
+//
+// The per-file "Extract Here" / "Compress with nvCOMP" context menus are
+// provided by a nautilus-python extension and a Nemo script, both of which
+// already recognize multi-volume names (they match on the final extension).
+// Historically only the manual install_file_manager_integration.sh installed
+// them; the GUI toggle installed just MIME + .desktop, so users who enabled
+// integration from Settings never got context menus. Install them here,
+// best-effort, from wherever the files are available (deb layout first).
+
+static QString findIntegrationSource(const QString& relative)
+{
+    const QStringList roots = {
+        "/usr/share/nvcomp",                                    // deb install
+        QCoreApplication::applicationDirPath() + "/../share/nvcomp",
+        QCoreApplication::applicationDirPath() + "/../../platform/linux", // dev tree
+    };
+    for (const QString& root : roots) {
+        QString candidate = root + "/" + relative;
+        if (QFile::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return QString();
+}
+
+bool DesktopIntegration::installFileManagerIntegration()
+{
+    QString home = QDir::homePath();
+    bool any = false;
+
+    // Nautilus python extension (needs the python3-nautilus bindings to work;
+    // installing the file is harmless without them).
+    QString nautilusSrc = findIntegrationSource("nautilus/nautilus_extension.py");
+    if (nautilusSrc.isEmpty()) {
+        nautilusSrc = findIntegrationSource("nautilus_extension.py");
+    }
+    if (!nautilusSrc.isEmpty()) {
+        QString destDir = home + "/.local/share/nautilus-python/extensions";
+        if (ensureDirectoryExists(destDir)) {
+            QString dest = destDir + "/nvcomp_extension.py";
+            QFile::remove(dest);
+            any = QFile::copy(nautilusSrc, dest) || any;
+        }
+    }
+
+    // Nemo script.
+    QString nemoSrc = findIntegrationSource("nemo/nemo_script.sh");
+    if (nemoSrc.isEmpty()) {
+        nemoSrc = findIntegrationSource("nemo_script.sh");
+    }
+    if (!nemoSrc.isEmpty()) {
+        QString destDir = home + "/.local/share/nemo/scripts";
+        if (ensureDirectoryExists(destDir)) {
+            QString dest = destDir + "/nvCOMP";
+            QFile::remove(dest);
+            if (QFile::copy(nemoSrc, dest)) {
+                QFile::setPermissions(dest, QFile::permissions(dest)
+                    | QFileDevice::ExeOwner | QFileDevice::ExeGroup | QFileDevice::ExeOther);
+                any = true;
+            }
+        }
+    }
+
+    return any;
+}
+
+bool DesktopIntegration::uninstallFileManagerIntegration()
+{
+    QString home = QDir::homePath();
+    QFile::remove(home + "/.local/share/nautilus-python/extensions/nvcomp_extension.py");
+    QFile::remove(home + "/.local/share/nemo/scripts/nvCOMP");
+    return true;
 }
 
 bool DesktopIntegration::isInstalled() const
@@ -363,6 +446,11 @@ QString DesktopIntegration::generateMimeTypeXml() const
     xml += "<mime-info xmlns=\"http://www.freedesktop.org/standards/shared-mime-info\">\n";
     xml += "\n";
     
+    // Keep in sync with the packaged platform/linux/debian/nvcomp-mime.xml.
+    // Multi-volume archives are named stem.volNNN.ext and begin with the
+    // NVVM manifest magic, so every type needs *.vol*.<ext> globs and the
+    // NVVM/NVAR magics in addition to NVBC.
+
     // LZ4 MIME type
     xml += "  <mime-type type=\"application/x-lz4\">\n";
     xml += "    <comment>LZ4 compressed archive</comment>\n";
@@ -370,43 +458,61 @@ QString DesktopIntegration::generateMimeTypeXml() const
     xml += "    <glob pattern=\"*.vol*.lz4\"/>\n";
     xml += "    <magic priority=\"50\">\n";
     xml += "      <match type=\"string\" offset=\"0\" value=\"NVBC\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVVM\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVAR\"/>\n";
     xml += "    </magic>\n";
     xml += "    <icon name=\"nvcomp\"/>\n";
     xml += "  </mime-type>\n";
     xml += "\n";
-    
+
     // Zstd MIME type
     xml += "  <mime-type type=\"application/x-zstd\">\n";
     xml += "    <comment>Zstd compressed archive</comment>\n";
     xml += "    <glob pattern=\"*.zstd\"/>\n";
     xml += "    <glob pattern=\"*.zst\"/>\n";
     xml += "    <glob pattern=\"*.vol*.zstd\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.zst\"/>\n";
     xml += "    <magic priority=\"50\">\n";
     xml += "      <match type=\"string\" offset=\"0\" value=\"NVBC\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVVM\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVAR\"/>\n";
     xml += "    </magic>\n";
     xml += "    <icon name=\"nvcomp\"/>\n";
     xml += "  </mime-type>\n";
     xml += "\n";
-    
+
     // Snappy MIME type
     xml += "  <mime-type type=\"application/x-snappy\">\n";
     xml += "    <comment>Snappy compressed archive</comment>\n";
     xml += "    <glob pattern=\"*.snappy\"/>\n";
+    xml += "    <glob pattern=\"*.sz\"/>\n";
     xml += "    <glob pattern=\"*.vol*.snappy\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.sz\"/>\n";
     xml += "    <magic priority=\"50\">\n";
     xml += "      <match type=\"string\" offset=\"0\" value=\"NVBC\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVVM\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVAR\"/>\n";
     xml += "    </magic>\n";
     xml += "    <icon name=\"nvcomp\"/>\n";
     xml += "  </mime-type>\n";
     xml += "\n";
-    
-    // nvCOMP generic MIME type
+
+    // nvCOMP generic MIME type (nvcomp/gdeflate/ans/bitcomp)
     xml += "  <mime-type type=\"application/x-nvcomp\">\n";
     xml += "    <comment>nvCOMP compressed archive</comment>\n";
     xml += "    <glob pattern=\"*.nvcomp\"/>\n";
     xml += "    <glob pattern=\"*.gdeflate\"/>\n";
     xml += "    <glob pattern=\"*.ans\"/>\n";
     xml += "    <glob pattern=\"*.bitcomp\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.nvcomp\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.gdeflate\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.ans\"/>\n";
+    xml += "    <glob pattern=\"*.vol*.bitcomp\"/>\n";
+    xml += "    <magic priority=\"50\">\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVAR\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVBC\"/>\n";
+    xml += "      <match type=\"string\" offset=\"0\" value=\"NVVM\"/>\n";
+    xml += "    </magic>\n";
     xml += "    <icon name=\"nvcomp\"/>\n";
     xml += "  </mime-type>\n";
     xml += "\n";

@@ -54,27 +54,29 @@ void ArchiveLoaderWorker::run()
         // Check if this is a volume archive
         QFileInfo fileInfo(m_archivePath);
         QString basePath = m_archivePath;
-        
-        // Check for volume pattern (.nvcomp.001, etc.)
-        QRegularExpression volumeRegex("\\.\\d{3}$");
+
+        // Volume naming convention: stem.vol001.ext (see core volume.cpp).
+        QRegularExpression volumeRegex("\\.vol(\\d{3})\\.");
         if (m_archivePath.contains(volumeRegex)) {
-            // This is a volume - find the first volume
+            // This is a volume - route to the first one (it holds the manifest).
             QString path = m_archivePath;
-            path.replace(volumeRegex, ".001");
+            path.replace(volumeRegex, ".vol001.");
             if (QFile::exists(path)) {
                 basePath = path;
             }
-            
-            // Count volumes
+
+            // Count sibling volumes for the header display.
             volumeCount = 0;
             for (int i = 1; i < 1000; ++i) {
                 QString volumePath = m_archivePath;
-                volumePath.replace(volumeRegex, QString(".%1").arg(i, 3, 10, QChar('0')));
+                volumePath.replace(volumeRegex,
+                                   QString(".vol%1.").arg(i, 3, 10, QChar('0')));
                 if (!QFile::exists(volumePath)) {
                     break;
                 }
                 volumeCount++;
             }
+            if (volumeCount == 0) volumeCount = 1;
         }
         
         emit loadingProgress(30, "Reading archive header...");
@@ -93,17 +95,19 @@ void ArchiveLoaderWorker::run()
         
         const uint32_t ARCHIVE_MAGIC = 0x4E564152; // "NVAR" - uncompressed
         const uint32_t BATCHED_MAGIC = 0x4E564243; // "NVBC" - compressed
-        
-        if (magic == BATCHED_MAGIC) {
-            // This is a compressed archive - decompress it in memory first
+        const uint32_t VOLUME_MAGIC = 0x4E56564D;  // "NVVM" - multi-volume manifest
+
+        if (magic == BATCHED_MAGIC || magic == VOLUME_MAGIC) {
+            // Compressed (or multi-volume) archive - the decompress engines
+            // reassemble volumes automatically when given the vol001 path.
             file.close();
             emit loadingProgress(40, "Decompressing archive to read contents...");
-            
+
             if (!loadCompressedArchive(basePath, files, totalSize, totalCompressed)) {
                 // Error already emitted by loadCompressedArchive
                 return;
             }
-            
+
             // Success - continue to display
             emit loadingProgress(100, "Loading complete");
             emit loadingComplete(files, totalSize, totalCompressed, volumeCount);
@@ -126,24 +130,49 @@ void ArchiveLoaderWorker::run()
         
         ArchiveHeader header;
         file.read(reinterpret_cast<char*>(&header), sizeof(header));
-        
+
         if (!file.good()) {
             emit loadingError("Failed to read archive header");
             return;
         }
-        
+
+        // v1 entries are 16 bytes (pathLength + padding + fileSize); v2 adds
+        // mode + mtime (24 bytes). Must match core/include/nvcomp_core.hpp.
+        if (header.version < 1 || header.version > 2) {
+            emit loadingError(QString("Unsupported archive version (%1).\n\n"
+                "This archive was created by a newer version of nvCOMP.")
+                .arg(header.version));
+            return;
+        }
+        const bool v1 = header.version < 2;
+
         emit loadingProgress(50, QString("Reading %1 file entries...").arg(header.fileCount));
-        
+
         // Read file entries from uncompressed archive
         for (uint32_t i = 0; i < header.fileCount && !m_canceled; ++i) {
-            struct FileEntry {
+            struct FileEntryV1 {
                 uint32_t pathLength;
                 uint64_t fileSize;
             };
-            
+            struct FileEntry {
+                uint32_t pathLength;
+                uint32_t mode;
+                uint64_t fileSize;
+                uint64_t mtimeNs;
+            };
+
             FileEntry entry;
-            file.read(reinterpret_cast<char*>(&entry), sizeof(entry));
-            
+            if (v1) {
+                FileEntryV1 e1;
+                file.read(reinterpret_cast<char*>(&e1), sizeof(e1));
+                entry.pathLength = e1.pathLength;
+                entry.mode = 0;
+                entry.fileSize = e1.fileSize;
+                entry.mtimeNs = 0;
+            } else {
+                file.read(reinterpret_cast<char*>(&entry), sizeof(entry));
+            }
+
             if (!file.good()) {
                 emit loadingError(QString("Failed to read file entry %1").arg(i));
                 return;

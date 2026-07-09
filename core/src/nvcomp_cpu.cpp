@@ -562,7 +562,9 @@ static void compressCPUStreaming(AlgoType algo,
 
         FileEntry fe;
         fe.pathLength = static_cast<uint32_t>(e.relativePath.size());
+        fe.mode = e.mode;
         fe.fileSize = e.fileSize;
+        fe.mtimeNs = e.mtimeNs;
         appendBytes(reinterpret_cast<const uint8_t*>(&fe), sizeof(FileEntry));
         appendBytes(reinterpret_cast<const uint8_t*>(e.relativePath.data()),
                     e.relativePath.size());

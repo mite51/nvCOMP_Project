@@ -21,6 +21,7 @@
 #include <QMimeData>
 #include <QDir>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QUrl>
 #include <QPushButton>
 #include <QListView>
@@ -903,7 +904,7 @@ void MainWindow::onViewArchiveTriggered()
         this,
         tr("Select Archive to View"),
         QString(),
-        tr("nvCOMP Archives (*.nvcomp *.nvcomp.*);;All Files (*.*)")
+        tr("nvCOMP Archives (*.nvcomp *.lz4 *.zstd *.zst *.snappy *.sz *.gdeflate *.ans *.bitcomp *.vol*.*);;All Files (*.*)")
     );
     
     if (archivePath.isEmpty()) {
@@ -931,15 +932,17 @@ void MainWindow::onFileListDoubleClicked(QListWidgetItem* item)
     QString filePath = item->text();
     QFileInfo fileInfo(filePath);
     
-    // Check if this is a compressed archive file
+    // Check if this is a compressed archive file: any supported algorithm
+    // extension, including multi-volume names like output.vol001.zstd.
     QString suffix = fileInfo.suffix().toLower();
     QString fileName = fileInfo.fileName().toLower();
-    
-    // Check for archive extensions
-    bool isArchive = suffix == "nvcomp" || 
-                     fileName.contains(".nvcomp.") ||
-                     fileName.endsWith(".nvcomp");
-    
+
+    static const QStringList kArchiveSuffixes = {
+        "nvcomp", "lz4", "zstd", "zst", "snappy", "sz", "gdeflate", "ans", "bitcomp"
+    };
+    bool isArchive = kArchiveSuffixes.contains(suffix) ||
+                     fileName.contains(QRegularExpression("\\.vol\\d{3}\\."));
+
     if (isArchive) {
         // Open archive viewer
         ArchiveViewerDialog dialog(filePath, this);
@@ -947,7 +950,7 @@ void MainWindow::onFileListDoubleClicked(QListWidgetItem* item)
     } else {
         // For non-archive files, show info message
         QMessageBox::information(this, tr("File Info"),
-            tr("File: %1\n\nDouble-click archive files (*.nvcomp) to view their contents.")
+            tr("File: %1\n\nDouble-click archive files (*.nvcomp, *.lz4, *.zstd, ...) to view their contents.")
                 .arg(fileInfo.fileName()));
     }
 }

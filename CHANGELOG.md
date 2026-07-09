@@ -2,6 +2,46 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [3.4.0] - 2026-07-09
+
+### Major Themes: File Properties (Archive v2), Multi-Volume GUI Viewing, Desktop Integration Fixes
+
+#### Added
+
+- **Archive format v2 — permissions + mtime preservation (cross-platform)**
+  - `FileEntry` grows 16 -> 24 bytes: `{pathLength, mode, fileSize, mtimeNs}`.
+    `mode` holds POSIX permission bits (executable bit included); `mtimeNs`
+    holds the modification time in nanoseconds since the epoch. Zero means
+    "unknown" and is skipped on extraction.
+  - Capture: one `::stat` per file on POSIX; Windows captures mtime via
+    std::filesystem (mode stays unknown). Apply: `fchmod` after create (so the
+    process umask can't strip bits) + `futimens`; span/large files get
+    `chmod`/`utimensat` after close; Windows applies mtime only.
+  - Compatibility: readers accept v1 and v2 (v1 entries parse with defaults);
+    writers emit v2. Old builds reject v2 archives with a clean
+    "Unsupported archive version" (the GUI viewer previously had **no**
+    version check and now does). NVBC/NVVM outer formats unchanged.
+  - Verified on the isaac-sim tree: 87,994 files (2,373 executables) round-trip
+    with 0 permission/mtime mismatches; new `unit_test/test_metadata.sh`
+    covers GPU/CPU/Manager/multi-volume/1MB-feed paths.
+  - Out of scope (documented): directory permissions, ownership, symlinks.
+
+#### Fixed
+
+- **GUI can now view multi-volume archives**: the archive viewer recognizes
+  the NVVM volume-manifest magic and routes vol001 files through the
+  volume-aware decompress engines; the broken `.NNN`-suffix volume regex was
+  replaced with the real `.volNNN.` convention; the "View Archive" dialog
+  filter and double-click detection now accept all algorithm extensions and
+  volume names (previously `.nvcomp` only).
+- **Desktop integration covers multi-volume archives**: the GUI-generated
+  user-level MIME XML now matches the packaged `nvcomp-mime.xml` (adds
+  `*.vol*.{zst,sz,nvcomp,gdeflate,ans,bitcomp}` globs and NVVM/NVAR magic
+  sniffing) — the old incomplete file shadowed the correct system-wide one.
+  The Settings -> Integration toggle now also installs the Nautilus python
+  extension and Nemo script (the actual context-menu providers), which were
+  previously only installed by a manual shell script.
+
 ## [3.3.0] - 2026-07-08
 
 ### Major Theme: Streaming Extraction — Decompression Is ~4x Faster, 24x Less RAM
