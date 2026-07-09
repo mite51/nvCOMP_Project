@@ -8,6 +8,11 @@
 #include <algorithm>
 #include <stdexcept>
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <unordered_set>
 
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
@@ -770,75 +775,353 @@ std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& f
 // Archive Extraction
 // ============================================================================
 
+// ============================================================================
+// Streaming archive extraction
+// ============================================================================
+
+// Lean single-shot file write for extraction workers. On POSIX this is plain
+// open/write/close (measured ~equal to ofstream single-threaded but scales to
+// ~4x with 8 workers); elsewhere it falls back to the existing writeFile.
+static void writeFileFast(const fs::path& path, const uint8_t* data, size_t n) {
+#ifdef _WIN32
+    writeFile(path, data, n);
+#else
+    int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        throw std::runtime_error("Failed to create output file: " + path.string());
+    }
+    size_t off = 0;
+    while (off < n) {
+        ssize_t w = ::write(fd, data + off, n - off);
+        if (w <= 0) {
+            ::close(fd);
+            throw std::runtime_error("Failed to write output file: " + path.string());
+        }
+        off += static_cast<size_t>(w);
+    }
+    ::close(fd);
+#endif
+}
+
+struct ArchiveExtractor::Impl {
+    enum class State { Header, Entry, Path, Data, Done };
+
+    // Holds a feed's releaseBuffer callback; fires when the last reference
+    // (the feed() call itself or any write task using the buffer) drops.
+    struct FeedGuard {
+        std::function<void()> release;
+        ~FeedGuard() { if (release) release(); }
+    };
+
+    struct Task {
+        fs::path path;
+        const uint8_t* data;
+        size_t n;
+        std::shared_ptr<FeedGuard> guard;
+    };
+
+    explicit Impl(const std::string& outputPath, size_t writerThreads)
+        : outputPath_(outputPath), verbose_(isVerbose()) {
+        for (size_t i = 0; i < writerThreads; i++) {
+            workers_.emplace_back([this] { workerLoop(); });
+        }
+    }
+
+    ~Impl() { stopWorkers(); }
+
+    // ---- parsing -----------------------------------------------------------
+
+    // Accumulate exactly `need` contiguous bytes; returns nullptr until enough
+    // input has arrived. Fast path: parse in place with no copy.
+    const uint8_t* fill(size_t need, const uint8_t*& p, size_t& n) {
+        if (carry_.empty() && n >= need) {
+            const uint8_t* r = p;
+            p += need;
+            n -= need;
+            return r;
+        }
+        size_t take = std::min(need - carry_.size(), n);
+        carry_.insert(carry_.end(), p, p + take);
+        p += take;
+        n -= take;
+        return carry_.size() == need ? carry_.data() : nullptr;
+    }
+
+    void feed(const uint8_t* data, size_t n, std::function<void()> releaseBuffer) {
+        auto guard = std::make_shared<FeedGuard>();
+        guard->release = std::move(releaseBuffer);
+        checkWorkerError();
+
+        const uint8_t* p = data;
+        while (n > 0) {
+            switch (state_) {
+            case State::Header: {
+                const uint8_t* b = fill(sizeof(ArchiveHeader), p, n);
+                if (!b) break;
+                std::memcpy(&header_, b, sizeof(ArchiveHeader));
+                carry_.clear();
+                if (header_.magic != ARCHIVE_MAGIC) {
+                    throw std::runtime_error("Invalid archive: bad magic number");
+                }
+                if (header_.version != ARCHIVE_VERSION) {
+                    throw std::runtime_error("Unsupported archive version");
+                }
+                if (verbose_) {
+                    std::cout << "Extracting " << header_.fileCount
+                              << " file(s) to: " << outputPath_ << "\n";
+                }
+                if (!outputPath_.empty()) {
+                    fs::create_directories(outputPath_);
+                }
+                state_ = header_.fileCount == 0 ? State::Done : State::Entry;
+                break;
+            }
+            case State::Entry: {
+                const uint8_t* b = fill(sizeof(FileEntry), p, n);
+                if (!b) break;
+                std::memcpy(&entry_, b, sizeof(FileEntry));
+                carry_.clear();
+                if (entry_.pathLength == 0 || entry_.pathLength > (1u << 20)) {
+                    throw std::runtime_error("Invalid archive: bad path length");
+                }
+                state_ = State::Path;
+                break;
+            }
+            case State::Path: {
+                const uint8_t* b = fill(entry_.pathLength, p, n);
+                if (!b) break;
+                std::string rel(reinterpret_cast<const char*>(b), entry_.pathLength);
+                carry_.clear();
+                if (verbose_) {
+                    std::cout << "  Extracting: " << rel
+                              << " (" << entry_.fileSize << " bytes)\n";
+                }
+                fullPath_ = fs::path(outputPath_) / fs::path(rel);
+                makeParentDirs(fullPath_);
+                if (entry_.fileSize == 0) {
+                    dispatch(fullPath_, nullptr, 0, guard);
+                    fileDone();
+                } else {
+                    dataRemaining_ = entry_.fileSize;
+                    state_ = State::Data;
+                }
+                break;
+            }
+            case State::Data: {
+                size_t take = static_cast<size_t>(
+                    std::min<uint64_t>(dataRemaining_, n));
+                if (!spanFile_.is_open() && take == dataRemaining_) {
+                    // Whole (rest of) file inside this feed: pool-writable.
+                    dispatch(fullPath_, p, take, guard);
+                } else {
+                    // File spans feeds: write inline through a kept-open
+                    // stream (only large files hit this; no lifetime issues).
+                    if (!spanFile_.is_open()) {
+                        spanFile_.open(fullPath_, std::ios::binary | std::ios::trunc);
+                        if (!spanFile_.is_open()) {
+                            throw std::runtime_error(
+                                "Failed to create output file: " + fullPath_.string());
+                        }
+                    }
+                    spanFile_.write(reinterpret_cast<const char*>(p),
+                                    static_cast<std::streamsize>(take));
+                    if (!spanFile_) {
+                        throw std::runtime_error(
+                            "Failed to write output file: " + fullPath_.string());
+                    }
+                    bytesWritten_.fetch_add(take, std::memory_order_relaxed);
+                }
+                p += take;
+                n -= take;
+                dataRemaining_ -= take;
+                if (dataRemaining_ == 0) {
+                    if (spanFile_.is_open()) spanFile_.close();
+                    fileDone();
+                }
+                break;
+            }
+            case State::Done:
+                throw std::runtime_error(
+                    "Invalid archive: data past the last file entry");
+            }
+            // Note: when fill() returns nullptr it has consumed all of n,
+            // so the loop terminates naturally on partial fields.
+        }
+    }
+
+    void fileDone() {
+        filesDone_++;
+        state_ = filesDone_ == header_.fileCount ? State::Done : State::Entry;
+    }
+
+    void makeParentDirs(const fs::path& fullPath) {
+        if (!fullPath.has_parent_path()) return;
+        std::string parent = fullPath.parent_path().string();
+        if (parent == lastParent_) return;               // consecutive-file fast path
+        if (dirsMade_.insert(parent).second) {
+            fs::create_directories(fullPath.parent_path());
+        }
+        lastParent_ = std::move(parent);
+    }
+
+    // ---- writing -----------------------------------------------------------
+
+    void dispatch(const fs::path& path, const uint8_t* data, size_t n,
+                  const std::shared_ptr<FeedGuard>& guard) {
+        if (workers_.empty()) {
+            writeFileFast(path, data, n);
+            bytesWritten_.fetch_add(n, std::memory_order_relaxed);
+            filesWritten_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        std::unique_lock<std::mutex> lk(mtx_);
+        cvSpace_.wait(lk, [&] {
+            return tasks_.size() < kMaxQueuedTasks || abort_.load();
+        });
+        if (abort_.load()) {
+            lk.unlock();
+            checkWorkerError();
+            return;
+        }
+        tasks_.push_back(Task{path, data, n, guard});
+        outstanding_++;
+        lk.unlock();
+        cvWork_.notify_one();
+    }
+
+    void workerLoop() {
+        for (;;) {
+            Task t;
+            {
+                std::unique_lock<std::mutex> lk(mtx_);
+                cvWork_.wait(lk, [&] { return !tasks_.empty() || stop_.load(); });
+                if (tasks_.empty()) return;
+                t = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            cvSpace_.notify_one();
+            if (!abort_.load()) {
+                try {
+                    writeFileFast(t.path, t.data, t.n);
+                    bytesWritten_.fetch_add(t.n, std::memory_order_relaxed);
+                    filesWritten_.fetch_add(1, std::memory_order_relaxed);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    if (!workerError_) workerError_ = std::current_exception();
+                    abort_.store(true);
+                }
+            }
+            // t.guard drops here, releasing the feed buffer when last user.
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                outstanding_--;
+            }
+            cvIdle_.notify_all();
+        }
+    }
+
+    void checkWorkerError() {
+        if (!abort_.load()) return;
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (workerError_) std::rethrow_exception(workerError_);
+        throw std::runtime_error("Extraction aborted");
+    }
+
+    void drainWorkers() {
+        std::unique_lock<std::mutex> lk(mtx_);
+        cvIdle_.wait(lk, [&] { return outstanding_ == 0; });
+    }
+
+    void stopWorkers() {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            stop_.store(true);
+        }
+        cvWork_.notify_all();
+        cvSpace_.notify_all();
+        for (auto& w : workers_) {
+            if (w.joinable()) w.join();
+        }
+        workers_.clear();
+    }
+
+    void finish() {
+        drainWorkers();
+        stopWorkers();
+        checkWorkerError();
+        if (state_ == State::Header) {
+            throw std::runtime_error("Invalid archive: too small");
+        }
+        if (state_ != State::Done || !carry_.empty() || spanFile_.is_open()) {
+            throw std::runtime_error("Invalid archive: truncated file data");
+        }
+        if (verbose_) {
+            std::cout << "Extraction complete.\n";
+        }
+    }
+
+    void abandon() {
+        abort_.store(true);
+        stopWorkers();
+        if (spanFile_.is_open()) spanFile_.close();
+    }
+
+    // parsing state
+    std::string outputPath_;
+    bool verbose_;
+    State state_ = State::Header;
+    std::vector<uint8_t> carry_;
+    ArchiveHeader header_{};
+    FileEntry entry_{};
+    fs::path fullPath_;
+    uint64_t dataRemaining_ = 0;
+    uint32_t filesDone_ = 0;
+    std::ofstream spanFile_;
+    std::unordered_set<std::string> dirsMade_;
+    std::string lastParent_;
+
+    // writer pool
+    static constexpr size_t kMaxQueuedTasks = 8192;
+    std::vector<std::thread> workers_;
+    std::deque<Task> tasks_;
+    std::mutex mtx_;
+    std::condition_variable cvWork_, cvSpace_, cvIdle_;
+    size_t outstanding_ = 0;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> abort_{false};
+    std::exception_ptr workerError_;
+
+    std::atomic<uint64_t> bytesWritten_{0};
+    std::atomic<uint32_t> filesWritten_{0};
+};
+
+ArchiveExtractor::ArchiveExtractor(const std::string& outputPath, size_t writerThreads)
+    : impl_(std::make_unique<Impl>(outputPath, writerThreads)) {}
+ArchiveExtractor::~ArchiveExtractor() = default;
+
+void ArchiveExtractor::feed(const uint8_t* data, size_t n,
+                            std::function<void()> releaseBuffer) {
+    impl_->feed(data, n, std::move(releaseBuffer));
+}
+void ArchiveExtractor::finish() { impl_->finish(); }
+void ArchiveExtractor::abandon() { impl_->abandon(); }
+uint64_t ArchiveExtractor::bytesWritten() const {
+    return impl_->bytesWritten_.load(std::memory_order_relaxed);
+}
+uint32_t ArchiveExtractor::filesWritten() const {
+    return impl_->filesWritten_.load(std::memory_order_relaxed);
+}
+
+// Legacy whole-buffer extraction, now a thin wrapper over the streaming
+// extractor so there is exactly one archive parser. Synchronous writes
+// (writerThreads = 0) preserve the original behavior.
 void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& outputPath) {
     if (archiveData.size() < sizeof(ArchiveHeader)) {
         throw std::runtime_error("Invalid archive: too small");
     }
-    
-    size_t offset = 0;
-    
-    // Read header
-    ArchiveHeader header;
-    std::memcpy(&header, archiveData.data() + offset, sizeof(ArchiveHeader));
-    offset += sizeof(ArchiveHeader);
-    
-    if (header.magic != ARCHIVE_MAGIC) {
-        throw std::runtime_error("Invalid archive: bad magic number");
-    }
-    
-    if (header.version != ARCHIVE_VERSION) {
-        throw std::runtime_error("Unsupported archive version");
-    }
-    
-    const bool verbose = isVerbose();
-    if (verbose) {
-        std::cout << "Extracting " << header.fileCount << " file(s) to: " << outputPath << "\n";
-    }
-    
-    // Create output directory if it doesn't exist
-    if (!outputPath.empty()) {
-        fs::create_directories(outputPath);
-    }
-    
-    // Extract each file
-    for (uint32_t i = 0; i < header.fileCount; i++) {
-        if (offset + sizeof(FileEntry) > archiveData.size()) {
-            throw std::runtime_error("Invalid archive: truncated file entry");
-        }
-        
-        FileEntry entry;
-        std::memcpy(&entry, archiveData.data() + offset, sizeof(FileEntry));
-        offset += sizeof(FileEntry);
-        
-        if (offset + entry.pathLength + entry.fileSize > archiveData.size()) {
-            throw std::runtime_error("Invalid archive: truncated file data");
-        }
-        
-        // Read path
-        std::string filePath(
-            reinterpret_cast<const char*>(archiveData.data() + offset),
-            entry.pathLength
-        );
-        offset += entry.pathLength;
-        
-        if (verbose) {
-            std::cout << "  Extracting: " << filePath << " (" << entry.fileSize << " bytes)\n";
-        }
-        
-        // Construct full output path
-        fs::path fullPath = fs::path(outputPath) / fs::path(filePath);
-        
-        // Create parent directories
-        createDirectories(fullPath.string());
-        
-        // Write file
-        writeFile(fullPath, archiveData.data() + offset, entry.fileSize);
-        offset += entry.fileSize;
-    }
-    
-    if (verbose) {
-        std::cout << "Extraction complete.\n";
-    }
+    ArchiveExtractor ex(outputPath, 0);
+    ex.feed(archiveData.data(), archiveData.size());
+    ex.finish();
 }
 
 // ============================================================================

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <filesystem>
+#include <memory>
 
 // Windows DLL export/import macros
 #ifdef _WIN32
@@ -188,6 +189,43 @@ NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFile(const std::string& fi
 NVCOMP_CORE_API std::vector<uint8_t> createArchiveFromFileList(const std::vector<std::string>& filePaths, ProgressCallback callback = nullptr);
 NVCOMP_CORE_API void extractArchive(const std::vector<uint8_t>& archiveData, const std::string& outputPath);
 NVCOMP_CORE_API void listArchive(const std::vector<uint8_t>& archiveData);
+
+/**
+ * Incremental (streaming) NVAR archive extractor.
+ *
+ * feed() accepts the decompressed archive byte stream in arbitrary pieces --
+ * headers, paths, and file data may be split across calls -- and writes files
+ * as their bytes arrive. With writerThreads > 0, whole-in-one-feed files are
+ * written by a worker pool; the optional per-feed releaseBuffer callback fires
+ * only after every write referencing that feed's bytes has completed, so
+ * callers can hand over reusable buffers (e.g. pinned GPU-download buffers)
+ * without copying. Files spanning multiple feeds are written inline on the
+ * feeding thread. finish() drains the pool, validates the stream ended
+ * exactly at the expected file count, and rethrows the first worker error.
+ * abandon() stops everything without validation (used before an external
+ * fallback re-extracts from scratch).
+ *
+ * The legacy whole-buffer extractArchive() is implemented on top of this
+ * class, so all archive-format parsing lives in one place.
+ */
+class NVCOMP_CORE_API ArchiveExtractor {
+public:
+    explicit ArchiveExtractor(const std::string& outputPath, size_t writerThreads = 0);
+    ~ArchiveExtractor();
+    ArchiveExtractor(const ArchiveExtractor&) = delete;
+    ArchiveExtractor& operator=(const ArchiveExtractor&) = delete;
+
+    void feed(const uint8_t* data, size_t n,
+              std::function<void()> releaseBuffer = nullptr);
+    void finish();
+    void abandon();
+    uint64_t bytesWritten() const;
+    uint32_t filesWritten() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 NVCOMP_CORE_API void listCompressedArchive(AlgoType algo, const std::string& inputFile, bool useCPU, bool cudaAvailable);
 
 /**

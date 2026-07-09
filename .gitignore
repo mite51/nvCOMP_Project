@@ -87,6 +87,8 @@ bench/data/
 bench/results/*
 !bench/results/SUMMARY.md
 !bench/results/poc_results.md
+!bench/results/decomp_experiments.md
 bench/scratch/
 bench/fixtures/
 poc/bin/
+bench/microbench_writers

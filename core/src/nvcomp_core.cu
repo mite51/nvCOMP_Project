@@ -16,6 +16,10 @@
 #include <atomic>
 #include <memory>
 
+#ifdef __linux__
+#include <sys/resource.h>
+#endif
+
 #include <cuda_runtime.h>
 
 // Batched API headers (for cross-compatible algorithms)
@@ -891,12 +895,229 @@ void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& f
 // nvCOMP 5.1 decompress alignment requirements are 1 byte for LZ4/Snappy/Zstd
 // inputs/outputs (verified via GetRequiredAlignments), so compressed chunk
 // pointers can point directly at NVBC's back-to-back chunk layout.
+// Experiment instrumentation (NVCOMP_PHASE_DEBUG=1): fine-grained timing of
+// the decompress pump to attribute wall time between GPU waits, disk reads,
+// and host memcpy/page-fault costs.
+static bool phaseDebug() {
+    static const bool on = [] {
+        const char* e = std::getenv("NVCOMP_PHASE_DEBUG");
+        return e && *e && *e != '0';
+    }();
+    return on;
+}
+
+static long minorFaults() {
+#ifdef __linux__
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_minflt;
+#else
+    return 0;
+#endif
+}
+
+// Thrown when the downstream consumer (extraction) fails. Distinct from GPU
+// errors on purpose: it must propagate out of the operation instead of
+// triggering the CPU fallback (which would re-decompress and re-extract).
+struct ExtractionAbort : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+// Consumer of decompressed bytes, called on the pipeline thread in stream
+// order. The consumer must invoke `release` exactly once when it is done with
+// [data, data+n) -- the memory is a reusable pinned download buffer.
+struct DecompressSink {
+    virtual ~DecompressSink() = default;
+    virtual void consume(const uint8_t* data, size_t n,
+                         std::function<void()> release) = 0;
+    virtual uint64_t consumed() const = 0;   // bytes accepted so far
+};
+
+// Appends into a std::vector (the pre-streaming behavior).
+struct VectorSink : DecompressSink {
+    explicit VectorSink(std::vector<uint8_t>& out) : out_(out) {}
+    void consume(const uint8_t* data, size_t n, std::function<void()> release) override {
+        out_.insert(out_.end(), data, data + n);
+        if (release) release();
+    }
+    uint64_t consumed() const override { return out_.size(); }
+    std::vector<uint8_t>& out_;
+};
+
+// Feeds decompressed bytes to an ArchiveExtractor on a dedicated thread, so
+// file writes overlap GPU decompression. Buffers are released back to the
+// pinned pool only after every write referencing them completes (the
+// extractor's per-feed guards handle that).
+class StreamingExtractSink : public DecompressSink {
+public:
+    StreamingExtractSink(const std::string& outputPath, size_t writerThreads)
+        : extractor_(outputPath, writerThreads) {
+        thread_ = std::thread([this] { run(); });
+    }
+    ~StreamingExtractSink() override {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void consume(const uint8_t* data, size_t n, std::function<void()> release) override {
+        {
+            std::unique_lock<std::mutex> lk(m_);
+            if (error_) {
+                lk.unlock();
+                if (release) release();
+                std::rethrow_exception(makeAbort());
+            }
+            queue_.push_back(Item{data, n, std::move(release)});
+        }
+        consumed_ += n;
+        cv_.notify_one();
+    }
+    uint64_t consumed() const override { return consumed_; }
+
+    // Drain the queue, join the extractor thread, validate the archive ended
+    // cleanly. Throws ExtractionAbort on any extraction/write failure.
+    void finish() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            done_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+        if (error_) std::rethrow_exception(makeAbort());
+        try {
+            extractor_.finish();
+        } catch (const std::exception& e) {
+            throw ExtractionAbort(e.what());
+        }
+    }
+
+    // Stop without validation (caller falls back to a from-scratch extract).
+    void abandon() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            done_ = true;
+            if (!error_) {
+                error_ = std::make_exception_ptr(std::runtime_error("abandoned"));
+            }
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+        extractor_.abandon();
+    }
+
+    uint64_t bytesWritten() const { return extractor_.bytesWritten(); }
+
+private:
+    struct Item {
+        const uint8_t* data;
+        size_t n;
+        std::function<void()> release;
+    };
+
+    std::exception_ptr makeAbort() {
+        try {
+            std::rethrow_exception(error_);
+        } catch (const std::exception& e) {
+            return std::make_exception_ptr(ExtractionAbort(e.what()));
+        }
+    }
+
+    void run() {
+        for (;;) {
+            Item it;
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                cv_.wait(lk, [&] { return !queue_.empty() || done_; });
+                if (queue_.empty()) return;
+                it = std::move(queue_.front());
+                queue_.pop_front();
+                if (error_) {
+                    lk.unlock();
+                    if (it.release) it.release();  // drain: free buffer, skip work
+                    continue;
+                }
+            }
+            try {
+                extractor_.feed(it.data, it.n, std::move(it.release));
+                // feed() wraps the release in a guard that fires even when
+                // feed throws, so buffers are never leaked past this point.
+            } catch (...) {
+                std::lock_guard<std::mutex> lk(m_);
+                if (!error_) error_ = std::current_exception();
+            }
+        }
+    }
+
+    ArchiveExtractor extractor_;
+    std::thread thread_;
+    std::deque<Item> queue_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::exception_ptr error_;
+    std::atomic<uint64_t> consumed_{0};
+};
+
+// Free-list pool of pinned download buffers shared by the pipeline slots and
+// the streaming consumer. Sized depth+spare so the extractor can trail the
+// GPU by a few sub-batches before backpressure (acquire blocks) kicks in.
+class PinnedOutPool {
+public:
+    void init(size_t count, size_t bytes) {
+        std::unique_lock<std::mutex> lk(m_);
+        // Never realloc while a consumer still holds a buffer.
+        cv_.wait(lk, [&] { return free_.size() == bufs_.size(); });
+        if (bufs_.size() >= count && !bufs_.empty() && bufs_[0].size() >= bytes) return;
+        bufs_.clear();
+        free_.clear();
+        bufs_.resize(count);
+        for (size_t i = 0; i < count; i++) {
+            bufs_[i].reserve(bytes);
+            free_.push_back(i);
+        }
+    }
+    size_t acquire() {
+        std::unique_lock<std::mutex> lk(m_);
+        cv_.wait(lk, [&] { return !free_.empty(); });
+        size_t i = free_.front();
+        free_.pop_front();
+        return i;
+    }
+    uint8_t* ptr(size_t i) { return bufs_[i].bytes(); }
+    void release(size_t i) {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            free_.push_back(i);
+        }
+        cv_.notify_all();
+    }
+
+private:
+    std::vector<PinnedBuffer> bufs_;
+    std::deque<size_t> free_;
+    std::mutex m_;
+    std::condition_variable cv_;
+};
+
 class BatchedDecompressPipeline {
 public:
-    // Appends the decompressed payload of the NVBC stream at `payloadOffset`
-    // in `path` onto `out`. Returns false -> caller uses the CPU path.
+    // Convenience wrapper: append the decompressed payload onto a vector.
     bool decompressFile(const std::string& path, uint64_t payloadOffset,
                         std::vector<uint8_t>& out) {
+        VectorSink sink(out);
+        return decompressFile(path, payloadOffset, sink);
+    }
+
+    // Streams the decompressed payload of the NVBC stream at `payloadOffset`
+    // in `path` into `sink` in order. Returns false -> caller uses the CPU
+    // path (resuming after sink.consumed() bytes when a mid-volume failure
+    // left a partial stream). Consumer failures throw ExtractionAbort.
+    bool decompressFile(const std::string& path, uint64_t payloadOffset,
+                        DecompressSink& sink) {
         std::ifstream f(fs::path(path), std::ios::binary);
         if (!f.is_open()) return false;
         f.seekg(static_cast<std::streamoff>(payloadOffset));
@@ -926,7 +1147,11 @@ public:
                 if (sz == 0 || sz > maxCompChunk_) return false; // corrupt/foreign
             }
 
-            out.reserve(out.size() + header.uncompressedSize);
+            const bool dbg = phaseDebug();
+            using tclk = std::chrono::steady_clock;
+            dbgWait_ = dbgInsert_ = dbgRead_ = 0.0;
+            long faults0 = dbg ? minorFaults() : 0;
+            auto volStart = tclk::now();
 
             const size_t numSub = (n + chunksPerSub_ - 1) / chunksPerSub_;
             size_t retired = 0;   // count of retired sub-batches
@@ -934,7 +1159,7 @@ public:
             for (size_t sb = 0; sb < numSub; sb++) {
                 Slot& s = slots_[sb % depth_];
                 if (s.inFlight) {
-                    retireSlot(s, out);
+                    retireSlot(s, sink);
                     retired++;
                 }
                 const size_t c0 = sb * chunksPerSub_;
@@ -942,19 +1167,38 @@ public:
                 uint64_t compBytes = 0;
                 for (size_t i = 0; i < cn; i++) compBytes += sizes[c0 + i];
                 // Disk read overlaps the other slots' in-flight GPU work.
+                auto r0 = tclk::now();
                 if (!f.read(reinterpret_cast<char*>(s.h_in.bytes()),
                             static_cast<std::streamsize>(compBytes))) {
                     throw std::runtime_error("short read in " + path);
                 }
+                dbgRead_ += std::chrono::duration<double>(tclk::now() - r0).count();
                 submitSlot(s, algo, &sizes[c0], cn,
                            subUncompBytes(header, c0, cn), compBytes);
                 submitted++;
             }
             for (size_t sb = retired; sb < submitted; sb++) {
                 Slot& s = slots_[sb % depth_];
-                if (s.inFlight) retireSlot(s, out);
+                if (s.inFlight) retireSlot(s, sink);
+            }
+            if (dbg) {
+                static tclk::time_point epoch = volStart;
+                double t0 = std::chrono::duration<double>(volStart - epoch).count();
+                double t1 = std::chrono::duration<double>(tclk::now() - epoch).count();
+                std::cout << "  [phase-debug] vol " << path.substr(path.size() > 24 ? path.size() - 24 : 0)
+                          << " span=" << t0 << ".." << t1
+                          << " wall=" << (t1 - t0)
+                          << " read=" << dbgRead_
+                          << " wait=" << dbgWait_
+                          << " insert=" << dbgInsert_
+                          << " minor-faults=" << (minorFaults() - faults0)
+                          << "\n";
             }
             return true;
+        } catch (const ExtractionAbort&) {
+            // Consumer-side failure: not a GPU problem, so no CPU fallback.
+            quiesce();
+            throw;
         } catch (const std::exception& e) {
             std::cerr << "GPU decompression failed (" << e.what()
                       << "); falling back to CPU\n";
@@ -965,7 +1209,7 @@ public:
 
 private:
     struct Slot {
-        PinnedBuffer h_in, h_out;
+        PinnedBuffer h_in;
         PinnedBuffer h_in_ptrs, h_in_sizes, h_out_sizes; // staging for tables
         PinnedBuffer h_statuses, h_actual;
         DeviceBuffer d_in, d_out, d_temp;
@@ -976,6 +1220,7 @@ private:
         bool inFlight = false;
         size_t chunkCount = 0;
         size_t uncompBytes = 0;
+        size_t poolIdx = SIZE_MAX;   // pinned download buffer for this flight
     };
 
     static uint64_t subUncompBytes(const BatchedHeader& h, size_t c0, size_t cn) {
@@ -1060,11 +1305,18 @@ private:
             }
         }
         const size_t subBytes = chunksPerSub_ * CHUNK_SIZE;
+        // Download buffers: depth + spare so the streaming consumer can trail
+        // the GPU by a few sub-batches before backpressure blocks acquire().
+        size_t spare = depth_;
+        if (const char* e = std::getenv("NVCOMP_DECOMP_SPARE_BUFS")) {
+            long v = std::atol(e);
+            if (v >= 0) spare = static_cast<size_t>(v);
+        }
+        pool_.init(depth_ + spare, subBytes);
         slots_.clear();
         slots_.resize(depth_);
         for (auto& s : slots_) {
             s.h_in.reserve(maxCompChunk_ * chunksPerSub_);
-            s.h_out.reserve(subBytes);
             s.h_in_ptrs.reserve(sizeof(void*) * chunksPerSub_);
             s.h_in_sizes.reserve(sizeof(size_t) * chunksPerSub_);
             s.h_out_sizes.reserve(sizeof(size_t) * chunksPerSub_);
@@ -1143,7 +1395,9 @@ private:
                                    sizeof(nvcompStatus_t) * cn, cudaMemcpyDeviceToHost, st));
         CUDA_CHECK(cudaMemcpyAsync(s.h_actual.bytes(), s.d_actual.get(),
                                    sizeof(size_t) * cn, cudaMemcpyDeviceToHost, st));
-        CUDA_CHECK(cudaMemcpyAsync(s.h_out.bytes(), s.d_out.get(), uncompBytes,
+        // Download into a pool buffer (blocks when the consumer is behind).
+        s.poolIdx = pool_.acquire();
+        CUDA_CHECK(cudaMemcpyAsync(pool_.ptr(s.poolIdx), s.d_out.get(), uncompBytes,
                                    cudaMemcpyDeviceToHost, st));
         CUDA_CHECK(cudaEventRecord(*s.done, st));
         s.inFlight = true;
@@ -1151,8 +1405,11 @@ private:
         s.uncompBytes = uncompBytes;
     }
 
-    void retireSlot(Slot& s, std::vector<uint8_t>& out) {
+    void retireSlot(Slot& s, DecompressSink& sink) {
+        using tclk = std::chrono::steady_clock;
+        auto w0 = tclk::now();
         CUDA_CHECK(cudaEventSynchronize(*s.done));
+        auto w1 = tclk::now();
         s.inFlight = false;
         const nvcompStatus_t* st = reinterpret_cast<const nvcompStatus_t*>(s.h_statuses.bytes());
         const size_t* actual = reinterpret_cast<const size_t*>(s.h_actual.bytes());
@@ -1162,16 +1419,27 @@ private:
                 throw std::runtime_error("chunk decompression failed");
             }
         }
-        // insert-append into reserved capacity: no zero-fill of the tail.
-        out.insert(out.end(), s.h_out.bytes(), s.h_out.bytes() + s.uncompBytes);
+        size_t idx = s.poolIdx;
+        s.poolIdx = SIZE_MAX;
+        PinnedOutPool* pool = &pool_;
+        sink.consume(pool_.ptr(idx), s.uncompBytes,
+                     [pool, idx] { pool->release(idx); });
+        auto w2 = tclk::now();
+        dbgWait_ += std::chrono::duration<double>(w1 - w0).count();
+        dbgInsert_ += std::chrono::duration<double>(w2 - w1).count();
     }
 
     // After a failure with work possibly still in flight, wait everything out
-    // so slot buffers are safe to reuse (or free), then clear sticky errors.
+    // so slot buffers are safe to reuse (or free), return unconsumed pool
+    // buffers, then clear sticky errors.
     void quiesce() {
         for (auto& s : slots_) {
             if (s.stream) cudaStreamSynchronize(*s.stream);
             s.inFlight = false;
+            if (s.poolIdx != SIZE_MAX) {
+                pool_.release(s.poolIdx);
+                s.poolIdx = SIZE_MAX;
+            }
         }
         cudaGetLastError();
     }
@@ -1183,7 +1451,21 @@ private:
     size_t tempBytes_ = 0;
     size_t depth_ = 0;
     std::vector<Slot> slots_;
+    PinnedOutPool pool_;
+    double dbgWait_ = 0.0, dbgInsert_ = 0.0, dbgRead_ = 0.0; // NVCOMP_PHASE_DEBUG
 };
+
+// Extraction writer-pool size: measured on NVMe, file creation scales ~4x up
+// to 8 threads and regresses past that. Override with NVCOMP_EXTRACT_THREADS
+// (0 = write inline on the extractor thread).
+static size_t extractWriterThreads() {
+    size_t n = std::min<size_t>(8, std::max<size_t>(1, std::thread::hardware_concurrency() / 2));
+    if (const char* e = std::getenv("NVCOMP_EXTRACT_THREADS")) {
+        long v = std::atol(e);
+        if (v >= 0) n = static_cast<size_t>(v);
+    }
+    return n;
+}
 
 void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputPath, ProgressCallback callback, CompressionStats* outStats) {
     using clock = std::chrono::steady_clock;
@@ -1195,20 +1477,46 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
     
     // Check if multi-volume
     if (volumeFiles.size() > 1 || isVolumeFile(volumeFiles[0])) {
-        // Read manifest from first volume
+        // Read only the manifest prefix (and metadata array when present).
+        // Previously this readFile()'d the entire first volume -- up to
+        // several GB -- just to parse ~48 bytes plus the metadata table.
         auto readStart = clock::now();
-        auto firstVolumeData = readFile(volumeFiles[0]);
+        std::error_code fsEc;
+        uint64_t firstVolumeSize = fs::file_size(fs::path(volumeFiles[0]), fsEc);
+        if (fsEc) {
+            throw std::runtime_error("Cannot stat volume file: " + volumeFiles[0]);
+        }
+        if (firstVolumeSize < sizeof(VolumeManifest)) {
+            throw std::runtime_error("Invalid volume file: too small for manifest");
+        }
+
+        VolumeManifest manifest;
+        std::vector<VolumeMetadata> volumeMetadata;
+        {
+            std::ifstream mf(fs::path(volumeFiles[0]), std::ios::binary);
+            if (!mf.is_open()) {
+                throw std::runtime_error("Cannot open volume file: " + volumeFiles[0]);
+            }
+            if (!mf.read(reinterpret_cast<char*>(&manifest), sizeof(VolumeManifest))) {
+                throw std::runtime_error("Invalid volume file: failed reading manifest");
+            }
+            if (manifest.magic == VOLUME_MAGIC) {
+                uint64_t prefix = sizeof(VolumeManifest)
+                    + sizeof(VolumeMetadata) * (uint64_t)manifest.volumeCount;
+                if (firstVolumeSize < prefix) {
+                    throw std::runtime_error("Invalid volume file: truncated metadata");
+                }
+                volumeMetadata.resize(manifest.volumeCount);
+                if (!mf.read(reinterpret_cast<char*>(volumeMetadata.data()),
+                             sizeof(VolumeMetadata) * manifest.volumeCount)) {
+                    throw std::runtime_error("Invalid volume file: failed reading metadata");
+                }
+            }
+        }
         if (outStats) {
             outStats->readSec += std::chrono::duration<double>(clock::now() - readStart).count();
         }
-        
-        if (firstVolumeData.size() < sizeof(VolumeManifest)) {
-            throw std::runtime_error("Invalid volume file: too small for manifest");
-        }
-        
-        VolumeManifest manifest;
-        std::memcpy(&manifest, firstVolumeData.data(), sizeof(VolumeManifest));
-        
+
         const bool verbose = isVerbose();
         if (manifest.magic != VOLUME_MAGIC) {
             // Not a multi-volume archive, treat as single file
@@ -1225,30 +1533,37 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             }
             
             auto computeStart = clock::now();
-            std::vector<uint8_t> archiveData;
+            // Decompress and extract concurrently: the pipeline streams the
+            // file from disk, the sink extracts on its own thread + writer
+            // pool. CPU fallback resumes the same stream (skipping any bytes
+            // the GPU already delivered before failing).
+            StreamingExtractSink sink(outputPath, extractWriterThreads());
             BatchedDecompressPipeline gpuPipe;
-            if (!gpuPipe.decompressFile(volumeFiles[0], 0, archiveData)) {
-                archiveData = decompressBatchedFormatCPU(algo, firstVolumeData);
+            if (!gpuPipe.decompressFile(volumeFiles[0], 0, sink)) {
+                uint64_t partial = sink.consumed();
+                auto firstVolumeData = readFile(volumeFiles[0]);
+                auto archiveData = decompressBatchedFormatCPU(algo, firstVolumeData);
+                if (partial > archiveData.size()) {
+                    throw std::runtime_error("Decompression resume mismatch");
+                }
+                auto keep = std::make_shared<std::vector<uint8_t>>(std::move(archiveData));
+                sink.consume(keep->data() + partial, keep->size() - partial,
+                             [keep] {});
             }
+            sink.finish();
             auto computeEnd = clock::now();
-            
+
             double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
-            size_t decompSize = archiveData.size();
+            size_t decompSize = sink.consumed();
             if (verbose) {
                 std::cout << "Decompressed size: " << decompSize << " bytes\n";
                 std::cout << "Time: " << duration << "s (" << (decompSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)\n";
             }
 
             if (outStats) {
-                outStats->computeSec += duration;
-                outStats->inputBytes = decompSize;        // uncompressed payload
-                outStats->outputBytes = firstVolumeData.size();
-            }
-            
-            auto writeStart = clock::now();
-            extractArchive(archiveData, outputPath);
-            if (outStats) {
-                outStats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
+                outStats->computeSec += duration;   // extraction overlaps decompression
+                outStats->inputBytes = decompSize;  // uncompressed payload
+                outStats->outputBytes = firstVolumeSize;
                 outStats->totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
                 finalizeStats(*outStats);
                 std::cout << formatStatsSummary(*outStats, "Decompression") << std::endl;
@@ -1268,12 +1583,7 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             std::cout << "Using GPU decompression (" << algoToString(static_cast<AlgoType>(manifest.algorithm)) << ")...\n";
         }
         
-        // Read volume metadata
-        size_t metadataOffset = sizeof(VolumeManifest);
-        std::vector<VolumeMetadata> volumeMetadata(manifest.volumeCount);
-        std::memcpy(volumeMetadata.data(), firstVolumeData.data() + metadataOffset, 
-                   sizeof(VolumeMetadata) * manifest.volumeCount);
-        
+        // Volume metadata was parsed with the manifest above.
         // Check all volumes exist
         if (volumeFiles.size() != manifest.volumeCount) {
             std::cerr << "Error: Expected " << manifest.volumeCount << " volumes, found " << volumeFiles.size() << std::endl;
@@ -1281,11 +1591,14 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
         }
         
         // Decompress all volumes through the pipelined GPU engine (buffers and
-        // streams reused across volumes); per-volume CPU fallback preserved.
-        std::vector<uint8_t> fullArchive;
-        fullArchive.reserve(manifest.totalUncompressedSize);
+        // streams reused across volumes) into a streaming extraction sink:
+        // files are written while later sub-batches/volumes still decompress.
+        // The NVAR stream continues seamlessly across volume boundaries, and
+        // the per-volume CPU fallback resumes the same stream (skipping bytes
+        // the GPU already delivered).
         double totalDuration = 0;
-        uint64_t totalCompressedRead = firstVolumeData.size();
+        uint64_t totalCompressedRead = firstVolumeSize;
+        StreamingExtractSink sink(outputPath, extractWriterThreads());
         BatchedDecompressPipeline gpuPipe;
 
         if (verbose) {
@@ -1303,14 +1616,19 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
                 : 0;
 
             auto computeStart = clock::now();
-            // The GPU pipeline streams the volume from disk itself (reads
-            // overlap decompression), appending into fullArchive.
-            if (!gpuPipe.decompressFile(volumeFiles[i], dataOffset, fullArchive)) {
+            uint64_t volConsumedBefore = sink.consumed();
+            if (!gpuPipe.decompressFile(volumeFiles[i], dataOffset, sink)) {
+                uint64_t partial = sink.consumed() - volConsumedBefore;
                 auto volumeData = readFile(volumeFiles[i]);
                 std::vector<uint8_t> payload(volumeData.begin() + dataOffset, volumeData.end());
                 auto decompressed = decompressBatchedFormatCPU(
                     static_cast<AlgoType>(manifest.algorithm), payload);
-                fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
+                if (partial > decompressed.size()) {
+                    throw std::runtime_error("Decompression resume mismatch");
+                }
+                auto keep = std::make_shared<std::vector<uint8_t>>(std::move(decompressed));
+                sink.consume(keep->data() + partial, keep->size() - partial,
+                             [keep] {});
             }
             auto computeEnd = clock::now();
             if (i > 0) {
@@ -1322,24 +1640,24 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             totalDuration += duration;
             if (outStats) outStats->computeSec += duration;
         }
-        
+
+        // Drain the extraction tail (most writes already overlapped).
+        auto writeStart = clock::now();
+        sink.finish();
+        double drainSec = std::chrono::duration<double>(clock::now() - writeStart).count();
+
         if (verbose) {
             std::cout << "\n";
             std::cout << "\n=== Decompression Summary ===\n";
-            std::cout << "Total decompressed: " << fullArchive.size() << " bytes\n";
+            std::cout << "Total decompressed: " << sink.consumed() << " bytes\n";
             std::cout << "Total time: " << totalDuration << "s ("
-                      << (fullArchive.size() / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)\n";
-        }
-        
-        if (outStats) {
-            outStats->inputBytes = fullArchive.size();
-            outStats->outputBytes = totalCompressedRead;
+                      << (sink.consumed() / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)\n";
         }
 
-        auto writeStart = clock::now();
-        extractArchive(fullArchive, outputPath);
         if (outStats) {
-            outStats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
+            outStats->inputBytes = sink.consumed();
+            outStats->outputBytes = totalCompressedRead;
+            outStats->writeSec += drainSec;
             outStats->totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
             finalizeStats(*outStats);
             std::cout << formatStatsSummary(*outStats, "Decompression") << std::endl;
@@ -1368,37 +1686,39 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
 
     auto computeStart = clock::now();
 
-    // Try the pipelined GPU decompressor first (it streams the file from disk
-    // itself, overlapping reads with decompression). The CPU fallback also
-    // handles CPU-compressed (single-chunk) and standard formats.
-    std::vector<uint8_t> archiveData;
+    // Decompress and extract concurrently: the pipeline streams the file from
+    // disk, the sink extracts on its own thread + writer pool. The CPU
+    // fallback (also handles CPU-compressed single-chunk and standard
+    // formats) resumes the same stream past any bytes the GPU delivered.
+    StreamingExtractSink sink(outputPath, extractWriterThreads());
     BatchedDecompressPipeline gpuPipe;
-    if (!gpuPipe.decompressFile(inputFile, 0, archiveData)) {
+    if (!gpuPipe.decompressFile(inputFile, 0, sink)) {
+        uint64_t partial = sink.consumed();
         auto readStart = clock::now();
         auto compressedData = readFile(inputFile);
         if (outStats) {
             outStats->readSec += std::chrono::duration<double>(clock::now() - readStart).count();
         }
-        archiveData = decompressBatchedFormatCPU(algo, compressedData);
+        auto archiveData = decompressBatchedFormatCPU(algo, compressedData);
+        if (partial > archiveData.size()) {
+            throw std::runtime_error("Decompression resume mismatch");
+        }
+        auto keep = std::make_shared<std::vector<uint8_t>>(std::move(archiveData));
+        sink.consume(keep->data() + partial, keep->size() - partial, [keep] {});
     }
+    sink.finish();
 
     auto computeEnd = clock::now();
     double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
-    
-    size_t decompSize = archiveData.size();
+
+    size_t decompSize = sink.consumed();
     if (verbose) {
         std::cout << "Decompressed size: " << decompSize << " bytes\n";
         std::cout << "Time: " << duration << "s (" << (decompSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)\n";
     }
     if (outStats) {
-        outStats->computeSec += duration;
+        outStats->computeSec += duration;   // extraction overlaps decompression
         outStats->inputBytes = decompSize;
-    }
-    
-    auto writeStart = clock::now();
-    extractArchive(archiveData, outputPath);
-    if (outStats) {
-        outStats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
         outStats->totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
         finalizeStats(*outStats);
         std::cout << formatStatsSummary(*outStats, "Decompression") << std::endl;

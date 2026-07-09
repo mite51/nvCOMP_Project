@@ -2,6 +2,55 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [3.3.0] - 2026-07-08
+
+### Major Theme: Streaming Extraction — Decompression Is ~4x Faster, 24x Less RAM
+
+Experiment-driven follow-up to 3.2.0 focused purely on decompression. On the
+real-world benchmark (13.7 GiB / 87,994 files, Zstd, 3 volumes) instrumented
+profiling attributed the wall time to: a whole-volume read just to parse the
+48-byte manifest (1.2 s), 13.7 GB of full-archive buffering (4.5 s of memcpy +
+3.6 M page faults), and single-threaded extraction of 88k files (4.6 s) — the
+GPU was idle-free (waits ~1 ms). All three are fixed:
+
+#### Added
+
+- **Streaming extraction (`ArchiveExtractor`)**: an incremental NVAR parser
+  (`core/src/archive.cpp`) that accepts the decompressed stream in arbitrary
+  pieces and writes files as bytes arrive — headers, paths, and file data may
+  split across feeds; files spanning feeds are written inline through a
+  kept-open stream. The legacy whole-buffer `extractArchive` is reimplemented
+  on top of it, so one parser serves the GPU, CPU-fallback, and Manager paths.
+- **Decompress-to-sink pipeline**: `BatchedDecompressPipeline` now feeds a
+  `DecompressSink`. The streaming sink runs the extractor on its own thread,
+  fed zero-copy from a free-list pool of pinned download buffers
+  (depth + spare; `NVCOMP_DECOMP_SPARE_BUFS`), with implicit backpressure —
+  the GPU throttles to filesystem speed instead of buffering. The 13.7 GB
+  `fullArchive` staging vector is gone.
+- **Parallel writer pool** inside the extractor (default `min(8, cores/2)`,
+  `NVCOMP_EXTRACT_THREADS`, 0 = inline): workers do open/write/close from
+  pinned-buffer spans with per-feed refcount guards; directories are
+  pre-created and deduped on the extractor thread. Measured file-creation
+  scaling on NVMe: 25k -> 103k files/s from 1 -> 8 threads.
+- **Slim manifest read**: multi-volume decompression reads only the manifest +
+  metadata prefix of volume 1 (previously the whole volume, up to 5 GB, was
+  read into RAM just to parse it).
+- **Phase instrumentation** (`NVCOMP_PHASE_DEBUG=1`): per-volume read/wait/
+  insert timing and page-fault deltas for future pipeline analysis.
+- Extraction failures raise a distinct `ExtractionAbort` so they propagate
+  cleanly instead of triggering the CPU fallback to re-decompress; mid-volume
+  GPU failures now resume the CPU fallback exactly after the bytes already
+  delivered (fixes a latent double-append in the old fallback).
+
+#### Results (warm cache, RTX 5090)
+
+- isaac-sim (13.7 GiB, 88k files): **11.3 s -> 2.8 s** wall, peak RSS
+  **17.3 GB -> 0.7 GB**; all files verified byte-identical.
+- 512 MB single volume: zstd decompress 0.65 -> 0.45 s end-to-end.
+- Small archives: 0.24 -> 0.03 s (no whole-file pre-read).
+- On-disk formats unchanged; all suites + pre-3.2 fixture compat pass,
+  including a 1 MB-sub-batch boundary stressor.
+
 ## [3.2.0] - 2026-07-07
 
 ### Major Themes: GPU Optimization Pass — Pipelined Sub-Batch Engine, Real GPU Decompression, VRAM Reduction
