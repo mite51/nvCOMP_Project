@@ -688,30 +688,34 @@ Typical performance on NVIDIA A100:
 
 CPU performance is typically 10-100x slower depending on CPU and data.
 
-### Multi-Volume Performance
+### Pipelined GPU Engine (LZ4/Snappy/Zstd)
 
-Multi-volume compression processes each volume sequentially:
+GPU batched compression and decompression run through a pipelined sub-batch
+engine: disk reads, PCIe transfers, and GPU kernels for different sub-batches
+overlap on rotating CUDA streams with pinned staging buffers.
 
-- **Throughput**: Same per-volume throughput as single-file compression
-- **Total Time**: Approximately linear with number of volumes
-- **Memory Usage**: Consistent and predictable per volume
-- **Example**: 10GB file with 2.5GB volumes = 4 volumes
-  - Each volume: ~0.5s compression at 5 GB/s (Zstd)
-  - Total time: ~2s (similar to single-file if it fit in memory)
-- **Overhead**: Minimal (<1%) for manifest creation and file I/O
-- **Recommendation**: Larger volume sizes = fewer volumes = less overhead
-  - But: Must fit in GPU memory (use default 2.5GB for safety)
+- **Sub-batch size**: 128MB (LZ4/Snappy) or 64MB (Zstd) by default — the
+  measured GPU throughput sweet spots. Override with the `NVCOMP_SUBBATCH_MB`
+  environment variable.
+- **VRAM usage**: ~pipeline-depth × sub-batch working set (roughly 1–5GB
+  depending on algorithm), independent of volume size. The engine shrinks its
+  depth and sub-batch size automatically to fit free VRAM.
+- **Multi-volume**: volumes are produced back-to-back by the same pipeline;
+  buffers and streams are reused across volumes, and volumes 2..N stream to
+  disk as they complete.
+- **Small archives** (<64MB) decompress on the CPU on purpose: CUDA startup
+  costs exceed the decode time at that size.
 
 ## Limitations
 
-1. **GPU Memory**: ✅ **Now Addressed with Multi-Volume Support!**
-   - **Before**: Large files would fail if they exceeded GPU memory
-   - **Now**: Automatic volume splitting (default 2.5GB) ensures compatibility with 8GB+ VRAM GPUs
-   - **Memory Requirements**: Each volume needs ~2.1x its size in VRAM (input + output + temp buffers)
-   - **Example**: 2.5GB volume ≈ 5.25GB VRAM needed (safe on 8GB GPUs)
-   - **Automatic Fallback**: Tool detects insufficient VRAM and falls back to CPU for cross-compatible algorithms
-   - **Customization**: Use `--volume-size` to adjust for your GPU or `--no-volumes` for unlimited size
-   - **Best Practice**: Keep default 2.5GB for compatibility, or increase for high-end GPUs
+1. **GPU Memory**: ✅ **Addressed by the pipelined sub-batch engine (LZ4/Snappy/Zstd)**
+   - VRAM usage no longer scales with volume size: the pipeline holds only a
+     few sub-batches (~1–5GB depending on algorithm) regardless of input size,
+     and shrinks itself to fit free VRAM automatically
+   - GPU-only Manager algorithms (GDeflate/ANS/Bitcomp) still process whole
+     volumes (~2.1x volume size in VRAM) — use `--volume-size` to bound them
+   - **Automatic Fallback**: insufficient VRAM falls back to CPU for cross-compatible algorithms
+   - **Customization**: `--volume-size` controls on-disk volume splitting; `--no-volumes` disables splitting (now safe for batched algorithms even for very large files)
 
 2. **CUDA Version**: Requires CUDA 11.0+. Tested with CUDA 12.x and 13.x.
 

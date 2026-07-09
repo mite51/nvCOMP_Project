@@ -21,7 +21,7 @@ set(CORE_SOURCES
 add_library(nvcomp_core SHARED ${CORE_SOURCES})
 
 # Set CUDA architectures
-set_property(TARGET nvcomp_core PROPERTY CUDA_ARCHITECTURES 75 80 86 89 90)
+set_property(TARGET nvcomp_core PROPERTY CUDA_ARCHITECTURES 75 80 86 89 90 120)
 
 # Define export macro
 target_compile_definitions(nvcomp_core PRIVATE NVCOMP_CORE_EXPORTS)

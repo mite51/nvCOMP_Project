@@ -32,6 +32,10 @@ constexpr uint32_t VOLUME_MAGIC = 0x4E56564D; // "NVVM"
 constexpr uint32_t VOLUME_VERSION = 1;
 constexpr uint64_t DEFAULT_VOLUME_SIZE = 2684354560ULL; // 2.5GB
 
+// GPU pipeline: number of sub-batch slots in flight (disk read / compress /
+// readback overlap). Each slot holds one sub-batch of CHUNK_SIZE chunks.
+constexpr size_t PIPELINE_DEPTH = 3;
+
 // ============================================================================
 // Data Structures
 // ============================================================================

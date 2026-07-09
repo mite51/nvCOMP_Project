@@ -2,6 +2,72 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [3.2.0] - 2026-07-07
+
+### Major Themes: GPU Optimization Pass — Pipelined Sub-Batch Engine, Real GPU Decompression, VRAM Reduction
+
+This release is a speed + VRAM optimization pass over the GPU batched
+(LZ4/Snappy/Zstd) paths. On-disk formats (NVBC/NVVM) are byte-identical to
+previous releases in both directions; archives interoperate freely across
+versions (validated by a fixture compatibility gate).
+
+#### Added
+
+- **Pipelined sub-batch compression engine** (`compressGPUBatchedStreaming`
+  rewrite in `core/src/nvcomp_core.cu`)
+  - Input is processed in sub-batches (default 128 MB for LZ4/Snappy, 64 MB
+    for Zstd — the measured throughput sweet spots; the old whole-volume
+    batches ran ~2.5x below peak). Override with `NVCOMP_SUBBATCH_MB`.
+  - Three overlapping actors: a reader thread streams archive bytes from disk
+    straight into pinned buffers, the GPU compresses sub-batches on rotating
+    CUDA streams, and the main thread packs/retires results and writes
+    volumes. Disk reads, PCIe transfers, and compression kernels overlap.
+  - All GPU batched compression (single-volume, `--no-volumes`, multi-volume)
+    now routes through this engine; the duplicated in-memory single-volume
+    and `splitIntoVolumes` copies are gone from the batched path.
+  - Peak VRAM for a 6 GB compress dropped from ~6.9 GB to ~1.5 GB; peak host
+    RSS from ~7.2 GB to ~5.4 GB (large multi-volume) and 2.0 GB -> 0.9 GB
+    (512 MB single volume).
+- **Real GPU batched decompression** (`BatchedDecompressPipeline`)
+  - LZ4/Snappy/Zstd decompression previously ran a single-threaded CPU chunk
+    loop despite the "GPU" path name. It now uses
+    `nvcompBatched{LZ4,Snappy,Zstd}DecompressAsync` through the same pipelined
+    sub-batch design (disk reads overlap decompression; buffers and streams
+    are reused across volumes).
+  - Uses the Blackwell hardware decompression engine when nvCOMP selects it
+    (requires the actual-bytes output array; statuses + actual sizes are
+    verified per chunk).
+  - Per-volume CPU fallback preserved: CPU-compressed single-chunk archives,
+    foreign/corrupt files, insufficient VRAM, or any GPU failure route to the
+    existing CPU decoder. Archives < 64 MB intentionally use the CPU decoder
+    (CUDA startup costs exceed the decode time).
+- **`packChunksKernel`**: compacts compressed chunks from worst-case-strided
+  slots into one contiguous buffer on-device, replacing the per-chunk
+  `cudaMemcpy` gather loop (measured 7.3x faster readback path).
+- **RAII CUDA wrappers** (`core/src/cuda_buffers.hpp`): `DeviceBuffer`,
+  `PinnedBuffer` (with pageable fallback), `CudaStream`, `CudaEvent`. Fixes
+  device-memory leaks on every thrown CUDA/nvCOMP error.
+- **Pipeline-aware VRAM sizing**: both engines query free VRAM and shrink
+  pipeline depth, then sub-batch size, to fit; the decompressor falls back to
+  CPU only when even the minimum footprint doesn't fit. The obsolete flat
+  "~2.1x volume size" gate was removed from the batched decompress path.
+- **Benchmark + POC harness**: `bench/gen_dataset.py`, `bench/bench.sh`
+  (per-phase CSV: wall, read/prepare/compute/write, peak RSS, peak VRAM,
+  round-trip verification), `poc/*.cu` micro-benchmarks, and
+  `unit_test/test_fixtures.sh` (backward-compat gate against pre-release
+  archives).
+
+#### Changed
+
+- `CUDA_ARCHITECTURES` now includes `120` (native Blackwell/RTX 5090 SASS);
+  building requires CUDA >= 12.8 (`-DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc`
+  if the default `nvcc` is older).
+- Multi-volume volumes 2..N stream to disk through a placeholder chunk-size
+  table patched on volume completion (no whole-volume compressed buffering);
+  volume 1 is still RAM-buffered for the manifest prepend.
+- Decompression no longer buffers whole compressed volumes in host RAM; the
+  full-archive buffer is appended via reserved inserts (no zero-fill spikes).
+
 ## [3.1.0] - 2026-05-01
 
 ### Major Themes: GUI/CLI Performance Parity, Streaming Read Pipeline, Verbose Mode

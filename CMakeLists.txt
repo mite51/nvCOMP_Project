@@ -378,7 +378,7 @@ if(BUILD_CLI)
     add_executable(nvcomp_cli main.cu)
 
     # Set CUDA architectures
-    set_property(TARGET nvcomp_cli PROPERTY CUDA_ARCHITECTURES 75 80 86 89 90)
+    set_property(TARGET nvcomp_cli PROPERTY CUDA_ARCHITECTURES 75 80 86 89 90 120)
 
     # Include directories
     # The CLI only needs the core library C API headers
@@ -488,7 +488,9 @@ if(BUILD_TESTS)
     # Register tests with CTest
     # ========================================================================
     
-    add_test(NAME test_c_api COMMAND test_c_api)
+    # test_c_api reads fixtures (sample.txt, sample_folder/) relative to CWD
+    add_test(NAME test_c_api COMMAND test_c_api
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/unit_test)
     
     message(STATUS "Test executables configured successfully")
 endif()

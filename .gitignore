@@ -81,3 +81,12 @@ unit_test/*.bitcomp
 
 build.log
 lintian.log
+
+# benchmark assets (generated)
+bench/data/
+bench/results/*
+!bench/results/SUMMARY.md
+!bench/results/poc_results.md
+bench/scratch/
+bench/fixtures/
+poc/bin/

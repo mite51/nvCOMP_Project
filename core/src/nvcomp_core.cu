@@ -1,12 +1,20 @@
 #include "nvcomp_core.hpp"
+#include "cuda_buffers.hpp"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <chrono>
 #include <iomanip>
 #include <cstring>
+#include <cstdlib>
 #include <algorithm>
 #include <stdexcept>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <atomic>
+#include <memory>
 
 #include <cuda_runtime.h>
 
@@ -46,6 +54,40 @@ namespace fs = std::filesystem;
     } while (0)
 
 namespace nvcomp_core {
+
+// ============================================================================
+// Device helpers
+// ============================================================================
+
+// Compacts variable-size compressed chunks from their worst-case-strided
+// output slots into one contiguous buffer. One block per chunk. Replaces the
+// previous per-chunk cudaMemcpy D2H loop (measured 7.3x faster readback).
+__global__ static void packChunksKernel(const void* const* srcPtrs,
+                                        const size_t* srcSizes,
+                                        const size_t* dstOffsets,
+                                        uint8_t* dst,
+                                        size_t numChunks) {
+    size_t c = blockIdx.x;
+    if (c >= numChunks) return;
+    const uint8_t* src = static_cast<const uint8_t*>(srcPtrs[c]);
+    uint8_t* out = dst + dstOffsets[c];
+    size_t sz = srcSizes[c];
+    if ((reinterpret_cast<uintptr_t>(src) & 15) == 0) {
+        size_t nv = sz / 16;
+        const uint4* src4 = reinterpret_cast<const uint4*>(src);
+        for (size_t i = threadIdx.x; i < nv; i += blockDim.x) {
+            uint4 v = src4[i];
+            memcpy(out + i * 16, &v, 16); // dst offset may be unaligned
+        }
+        for (size_t i = nv * 16 + threadIdx.x; i < sz; i += blockDim.x) {
+            out[i] = src[i];
+        }
+    } else {
+        for (size_t i = threadIdx.x; i < sz; i += blockDim.x) {
+            out[i] = src[i];
+        }
+    }
+}
 
 // ============================================================================
 // Helper Functions
@@ -130,778 +172,40 @@ AlgoType detectAlgorithmFromFile(const std::string& filename) {
 // GPU Batched Compression
 // ============================================================================
 
-// Internal function that compresses in-memory archive data.
-// Populates stats->prepareSec, computeSec, writeSec, outputBytes; leaves
-// readSec/inputBytes/total/throughput/ratio for the caller to fill.
-static void compressGPUBatchedFromBuffer(AlgoType algo, const std::vector<uint8_t>& archiveData, 
-                                         const std::string& outputFile, uint64_t maxVolumeSize,
-                                         ProgressCallback rawCallback = nullptr,
-                                         CompressionStats* stats = nullptr) {
-    using clock = std::chrono::steady_clock;
-    auto callback = makeThrottledCallback(rawCallback);
-    const bool verbose = isVerbose();
-
-    if (verbose) {
-        std::cout << "Using GPU batched compression (" << algoToString(algo) << ")...\n";
-    }
-    
-    size_t totalSize = archiveData.size();
-    if (verbose) {
-        std::cout << "Archive size: " << totalSize << " bytes\n";
-    }
-    
-    // Split into volumes if needed
-    auto volumes = splitIntoVolumes(archiveData, maxVolumeSize);
-    
-    // If single volume, use original behavior (continue with existing code)
-    if (volumes.size() == 1) {
-        size_t inputSize = volumes[0].size();
-        std::vector<uint8_t> inputData = volumes[0];
-    
-    auto prepareStart = clock::now();
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-    
-    // Calculate chunks
-    size_t chunk_count = (inputSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    if (verbose) {
-        std::cout << "Chunks: " << chunk_count << "\n";
-    }
-    
-    // Report total blocks and preparing stage if callback provided
-    // (Reading phase is complete at this point, reported by createArchive functions)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(chunk_count);
-        info.completedBlocks = 0;
-        info.currentBlock = 0;
-        info.currentBlockSize = 0;
-        info.overallProgress = 0.25f;  // Reading complete (0-25%), now preparing (25%)
-        info.currentBlockProgress = 0.0f;
-        info.throughputMBps = 0.0;
-        info.stage = "preparing";
-        callback(info);
-    }
-    
-    // Prepare input chunks on host
-    std::vector<void*> h_input_ptrs(chunk_count);
-    std::vector<size_t> h_input_sizes(chunk_count);
-    
-    for (size_t i = 0; i < chunk_count; i++) {
-        size_t offset = i * CHUNK_SIZE;
-        h_input_sizes[i] = std::min(CHUNK_SIZE, inputSize - offset);
-    }
-    
-    // Allocate device memory for input
-    uint8_t* d_input_data;
-    CUDA_CHECK(cudaMalloc(&d_input_data, inputSize));
-    CUDA_CHECK(cudaMemcpy(d_input_data, inputData.data(), inputSize, cudaMemcpyHostToDevice));
-    
-    // Setup input pointers
-    void** d_input_ptrs;
-    size_t* d_input_sizes;
-    CUDA_CHECK(cudaMalloc(&d_input_ptrs, sizeof(void*) * chunk_count));
-    CUDA_CHECK(cudaMalloc(&d_input_sizes, sizeof(size_t) * chunk_count));
-    
-    for (size_t i = 0; i < chunk_count; i++) {
-        h_input_ptrs[i] = d_input_data + i * CHUNK_SIZE;
-    }
-    CUDA_CHECK(cudaMemcpy(d_input_ptrs, h_input_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_input_sizes, h_input_sizes.data(), sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice));
-    
-    // Get temp size and max output size
-    size_t temp_bytes;
-    size_t max_out_bytes;
-    
-    if (algo == ALGO_LZ4) {
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &max_out_bytes));
-    } else if (algo == ALGO_SNAPPY) {
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &max_out_bytes));
-    } else if (algo == ALGO_ZSTD) {
-        NVCOMP_CHECK(nvcompBatchedZstdCompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &max_out_bytes));
-    }
-    
-    // Allocate temp and output
-    void* d_temp;
-    CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-    
-    uint8_t* d_output_data;
-    CUDA_CHECK(cudaMalloc(&d_output_data, max_out_bytes * chunk_count));
-    
-    void** d_output_ptrs;
-    size_t* d_output_sizes;
-    CUDA_CHECK(cudaMalloc(&d_output_ptrs, sizeof(void*) * chunk_count));
-    CUDA_CHECK(cudaMalloc(&d_output_sizes, sizeof(size_t) * chunk_count));
-    
-    std::vector<void*> h_output_ptrs(chunk_count);
-    for (size_t i = 0; i < chunk_count; i++) {
-        h_output_ptrs[i] = d_output_data + i * max_out_bytes;
-    }
-    CUDA_CHECK(cudaMemcpy(d_output_ptrs, h_output_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
-    
-    // Report compressing stage (25% allocated for reading/preparing)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(chunk_count);
-        info.completedBlocks = 0;
-        info.currentBlock = 0;
-        info.currentBlockSize = CHUNK_SIZE;
-        info.overallProgress = 0.25f;  // 25% for reading/preparing
-        info.currentBlockProgress = 0.0f;
-        info.throughputMBps = 0.0;
-        info.stage = "compressing";
-        callback(info);
-    }
-    
-    auto computeStart = clock::now();
-    if (stats) {
-        stats->prepareSec += std::chrono::duration<double>(computeStart - prepareStart).count();
-    }
-
-    // Compress
-    if (algo == ALGO_LZ4) {
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedLZ4CompressDefaultOpts, nullptr, stream));
-    } else if (algo == ALGO_SNAPPY) {
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedSnappyCompressDefaultOpts, nullptr, stream));
-    } else if (algo == ALGO_ZSTD) {
-        NVCOMP_CHECK(nvcompBatchedZstdCompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedZstdCompressDefaultOpts, nullptr, stream));
-    }
-    
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    auto computeEnd = clock::now();
-    
-    // Get output sizes
-    std::vector<size_t> h_output_sizes(chunk_count);
-    CUDA_CHECK(cudaMemcpy(h_output_sizes.data(), d_output_sizes, sizeof(size_t) * chunk_count, cudaMemcpyDeviceToHost));
-    
-    // Calculate total size
-    size_t totalCompSize = 0;
-    for (size_t i = 0; i < chunk_count; i++) {
-        totalCompSize += h_output_sizes[i];
-    }
-    
-    // Calculate throughput and duration
-    double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
-    double throughputMBps = (inputSize / (1024.0 * 1024.0)) / duration;
-    if (stats) {
-        stats->computeSec += duration;
-    }
-    
-    if (verbose) {
-        std::cout << "Compressed size: " << totalCompSize << " bytes\n";
-        std::cout << "Ratio: " << std::fixed << std::setprecision(2) << (double)inputSize / totalCompSize << "x\n";
-        std::cout << "Time: " << duration << "s (" << (inputSize / (1024.0 * 1024.0 * 1024.0)) / duration << " GB/s)\n";
-    }
-    
-    // Single "compression complete" callback before writing
-    // (replaces the previous per-chunk loop that fired thousands of cross-thread signals).
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(chunk_count);
-        info.completedBlocks = static_cast<int>(chunk_count);
-        info.currentBlock = static_cast<int>(chunk_count > 0 ? chunk_count - 1 : 0);
-        info.currentBlockSize = chunk_count > 0 ? h_input_sizes.back() : 0;
-        info.overallProgress = 0.75f;
-        info.currentBlockProgress = 1.0f;
-        info.throughputMBps = throughputMBps;
-        info.stage = "compressing";
-        callback(info);
-    }
-    
-    // Create output with metadata
-    auto writeStart = clock::now();
-    std::vector<uint8_t> outputData;
-    
-    // Write batched header
-    BatchedHeader header;
-    header.magic = BATCHED_MAGIC;
-    header.version = BATCHED_VERSION;
-    header.uncompressedSize = inputSize;
-    header.chunkCount = static_cast<uint32_t>(chunk_count);
-    header.chunkSize = CHUNK_SIZE;
-    header.algorithm = static_cast<uint32_t>(algo);
-    header.reserved = 0;
-    
-    const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
-    outputData.insert(outputData.end(), headerBytes, headerBytes + sizeof(BatchedHeader));
-    
-    // Write chunk sizes
-    std::vector<uint64_t> chunkSizes64(chunk_count);
-    for (size_t i = 0; i < chunk_count; i++) {
-        chunkSizes64[i] = h_output_sizes[i];
-    }
-    const uint8_t* sizesBytes = reinterpret_cast<const uint8_t*>(chunkSizes64.data());
-    outputData.insert(outputData.end(), sizesBytes, sizesBytes + sizeof(uint64_t) * chunk_count);
-    
-    // Copy compressed chunks
-    size_t dataStart = outputData.size();
-    outputData.resize(dataStart + totalCompSize);
-    size_t offset = 0;
-    for (size_t i = 0; i < chunk_count; i++) {
-        CUDA_CHECK(cudaMemcpy(outputData.data() + dataStart + offset, h_output_ptrs[i], h_output_sizes[i], cudaMemcpyDeviceToHost));
-        offset += h_output_sizes[i];
-    }
-    
-    size_t totalSizeWithMeta = outputData.size();
-    if (verbose) {
-        std::cout << "Total size with metadata: " << totalSizeWithMeta << " bytes\n";
-    }
-    
-    // Report writing stage (75% - start of writing phase)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(chunk_count);
-        info.completedBlocks = static_cast<int>(chunk_count);
-        info.currentBlock = static_cast<int>(chunk_count - 1);
-        info.currentBlockSize = 0;
-        info.overallProgress = 0.75f;  // Writing starts at 75%
-        info.currentBlockProgress = 1.0f;
-        info.throughputMBps = throughputMBps;
-        info.stage = "writing";
-        callback(info);
-    }
-    
-    writeFile(outputFile, outputData.data(), outputData.size(), callback);
-    auto writeEnd = clock::now();
-    if (stats) {
-        stats->writeSec += std::chrono::duration<double>(writeEnd - writeStart).count();
-        stats->outputBytes = outputData.size();
-    }
-    
-    // Report completion (100%)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(chunk_count);
-        info.completedBlocks = static_cast<int>(chunk_count);
-        info.currentBlock = static_cast<int>(chunk_count > 0 ? chunk_count - 1 : 0);
-        info.currentBlockSize = 0;
-        info.overallProgress = 1.0f;  // 100% complete
-        info.currentBlockProgress = 1.0f;
-        info.throughputMBps = throughputMBps;
-        info.stage = "complete";
-        callback(info);
-    }
-    
-    // Cleanup
-    cudaFree(d_input_data);
-    cudaFree(d_input_ptrs);
-    cudaFree(d_input_sizes);
-    cudaFree(d_output_data);
-    cudaFree(d_output_ptrs);
-    cudaFree(d_output_sizes);
-    cudaFree(d_temp);
-    cudaStreamDestroy(stream);
-        return;
-    }
-    
-    // Multi-volume compression
-    if (verbose) {
-        std::cout << "\nCompressing " << volumes.size() << " volume(s)...\n";
-    }
-    
-    // Create volume manifest
-    VolumeManifest manifest;
-    manifest.magic = VOLUME_MAGIC;
-    manifest.version = VOLUME_VERSION;
-    manifest.volumeCount = static_cast<uint32_t>(volumes.size());
-    manifest.algorithm = static_cast<uint32_t>(algo);
-    manifest.volumeSize = maxVolumeSize;
-    manifest.totalUncompressedSize = totalSize;
-    manifest.reserved = 0;
-    
-    // Prepare metadata and compressed data storage
-    std::vector<VolumeMetadata> volumeMetadata(volumes.size());
-    std::vector<std::vector<uint8_t>> volumeCompressedData(volumes.size());
-    uint64_t uncompressedOffset = 0;
-    double totalDuration = 0;
-    size_t totalCompressedSize = 0;
-    
-    // Create CUDA stream for compression
-    auto mvPrepareStart = clock::now();
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-    
-    // Compress each volume
-    for (size_t vol_idx = 0; vol_idx < volumes.size(); vol_idx++) {
-        if (verbose) {
-            std::cout << "\r  Processing volume " << (vol_idx + 1) << "/" << volumes.size() << "..." << std::flush;
+// Sub-batch sizing (chunks per GPU batch). POC sweep on RTX 5090: LZ4/Snappy
+// peak at 2048 chunks (128 MB), Zstd at 1024 (64 MB); the old whole-volume
+// batches (~40k chunks) ran 2.5x below peak. Override: NVCOMP_SUBBATCH_MB.
+static size_t subBatchChunksFor(AlgoType algo) {
+    size_t chunks = (algo == ALGO_ZSTD) ? 1024 : 2048;
+    if (const char* env = std::getenv("NVCOMP_SUBBATCH_MB")) {
+        long mb = std::atol(env);
+        if (mb > 0) {
+            chunks = std::max<size_t>(1, (static_cast<size_t>(mb) << 20) / CHUNK_SIZE);
         }
-        
-        // Report compressing stage for this volume (scale to 25%-75% range)
-        if (callback) {
-            float volumeProgress = (float)vol_idx / volumes.size();
-            BlockProgressInfo info;
-            info.totalBlocks = static_cast<int>(volumes.size());
-            info.completedBlocks = static_cast<int>(vol_idx);
-            info.currentBlock = static_cast<int>(vol_idx);
-            info.currentBlockSize = volumes[vol_idx].size();
-            info.overallProgress = 0.25f + (volumeProgress * 0.5f);  // 25% to 75%
-            info.currentBlockProgress = 0.0f;
-            info.throughputMBps = 0.0;
-            info.stage = "compressing";
-            callback(info);
-        }
-        
-        size_t inputSize = volumes[vol_idx].size();
-        std::vector<uint8_t>& inputData = volumes[vol_idx];
-        
-        // Calculate chunks for this volume
-        size_t chunk_count = (inputSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        
-        // Prepare input chunks on host
-        std::vector<void*> h_input_ptrs(chunk_count);
-        std::vector<size_t> h_input_sizes(chunk_count);
-        
-        for (size_t i = 0; i < chunk_count; i++) {
-            size_t offset = i * CHUNK_SIZE;
-            h_input_sizes[i] = std::min(CHUNK_SIZE, inputSize - offset);
-        }
-        
-        // Allocate device memory for input
-        uint8_t* d_input_data;
-        CUDA_CHECK(cudaMalloc(&d_input_data, inputSize));
-        CUDA_CHECK(cudaMemcpy(d_input_data, inputData.data(), inputSize, cudaMemcpyHostToDevice));
-        
-        // Setup input pointers
-        void** d_input_ptrs;
-        size_t* d_input_sizes;
-        CUDA_CHECK(cudaMalloc(&d_input_ptrs, sizeof(void*) * chunk_count));
-        CUDA_CHECK(cudaMalloc(&d_input_sizes, sizeof(size_t) * chunk_count));
-        
-        for (size_t i = 0; i < chunk_count; i++) {
-            h_input_ptrs[i] = d_input_data + i * CHUNK_SIZE;
-        }
-        CUDA_CHECK(cudaMemcpy(d_input_ptrs, h_input_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_input_sizes, h_input_sizes.data(), sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice));
-        
-        // Get temp size and max output size
-        size_t temp_bytes;
-        size_t max_out_bytes;
-        
-        if (algo == ALGO_LZ4) {
-            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetTempSizeAsync(
-                chunk_count, CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, inputSize));
-            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
-                CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &max_out_bytes));
-        } else if (algo == ALGO_SNAPPY) {
-            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetTempSizeAsync(
-                chunk_count, CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, inputSize));
-            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
-                CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &max_out_bytes));
-        } else if (algo == ALGO_ZSTD) {
-            NVCOMP_CHECK(nvcompBatchedZstdCompressGetTempSizeAsync(
-                chunk_count, CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &temp_bytes, inputSize));
-            NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
-                CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &max_out_bytes));
-        }
-        
-        // Allocate temp and output
-        void* d_temp;
-        CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-        
-        uint8_t* d_output_data;
-        CUDA_CHECK(cudaMalloc(&d_output_data, max_out_bytes * chunk_count));
-        
-        void** d_output_ptrs;
-        size_t* d_output_sizes;
-        CUDA_CHECK(cudaMalloc(&d_output_ptrs, sizeof(void*) * chunk_count));
-        CUDA_CHECK(cudaMalloc(&d_output_sizes, sizeof(size_t) * chunk_count));
-        
-        std::vector<void*> h_output_ptrs(chunk_count);
-        for (size_t i = 0; i < chunk_count; i++) {
-            h_output_ptrs[i] = d_output_data + i * max_out_bytes;
-        }
-        CUDA_CHECK(cudaMemcpy(d_output_ptrs, h_output_ptrs.data(), sizeof(void*) * chunk_count, cudaMemcpyHostToDevice));
-        
-        auto computeStartV = clock::now();
-        if (stats) {
-            stats->prepareSec += std::chrono::duration<double>(computeStartV - mvPrepareStart).count();
-        }
-
-        // Compress
-        if (algo == ALGO_LZ4) {
-            NVCOMP_CHECK(nvcompBatchedLZ4CompressAsync(
-                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-                nvcompBatchedLZ4CompressDefaultOpts, nullptr, stream));
-        } else if (algo == ALGO_SNAPPY) {
-            NVCOMP_CHECK(nvcompBatchedSnappyCompressAsync(
-                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-                nvcompBatchedSnappyCompressDefaultOpts, nullptr, stream));
-        } else if (algo == ALGO_ZSTD) {
-            NVCOMP_CHECK(nvcompBatchedZstdCompressAsync(
-                d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-                d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-                nvcompBatchedZstdCompressDefaultOpts, nullptr, stream));
-        }
-        
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-        auto computeEndV = clock::now();
-        
-        double duration = std::chrono::duration<double>(computeEndV - computeStartV).count();
-        totalDuration += duration;
-        if (stats) {
-            stats->computeSec += duration;
-        }
-        // Reset prepare clock so the next volume's prepare phase is timed from here.
-        mvPrepareStart = computeEndV;
-        
-        // Get output sizes
-        std::vector<size_t> h_output_sizes(chunk_count);
-        CUDA_CHECK(cudaMemcpy(h_output_sizes.data(), d_output_sizes, sizeof(size_t) * chunk_count, cudaMemcpyDeviceToHost));
-        
-        // Calculate total compressed size for this volume
-        size_t volumeCompSize = 0;
-        for (size_t i = 0; i < chunk_count; i++) {
-            volumeCompSize += h_output_sizes[i];
-        }
-        
-        // Create output with metadata for this volume
-        std::vector<uint8_t> outputData;
-        
-        // Write batched header
-        BatchedHeader header;
-        header.magic = BATCHED_MAGIC;
-        header.version = BATCHED_VERSION;
-        header.uncompressedSize = inputSize;
-        header.chunkCount = static_cast<uint32_t>(chunk_count);
-        header.chunkSize = CHUNK_SIZE;
-        header.algorithm = static_cast<uint32_t>(algo);
-        header.reserved = 0;
-        
-        const uint8_t* headerBytes = reinterpret_cast<const uint8_t*>(&header);
-        outputData.insert(outputData.end(), headerBytes, headerBytes + sizeof(BatchedHeader));
-        
-        // Write chunk sizes
-        std::vector<uint64_t> chunkSizes64(chunk_count);
-        for (size_t i = 0; i < chunk_count; i++) {
-            chunkSizes64[i] = h_output_sizes[i];
-        }
-        const uint8_t* sizesBytes = reinterpret_cast<const uint8_t*>(chunkSizes64.data());
-        outputData.insert(outputData.end(), sizesBytes, sizesBytes + sizeof(uint64_t) * chunk_count);
-        
-        // Copy compressed chunks
-        size_t dataStart = outputData.size();
-        outputData.resize(dataStart + volumeCompSize);
-        size_t offset = 0;
-        for (size_t i = 0; i < chunk_count; i++) {
-            CUDA_CHECK(cudaMemcpy(outputData.data() + dataStart + offset, h_output_ptrs[i], h_output_sizes[i], cudaMemcpyDeviceToHost));
-            offset += h_output_sizes[i];
-        }
-        
-        // Store compressed data for this volume
-        volumeCompressedData[vol_idx] = outputData;
-        
-        // Create volume metadata
-        VolumeMetadata meta;
-        meta.volumeIndex = vol_idx + 1;
-        meta.compressedSize = outputData.size();
-        meta.uncompressedOffset = uncompressedOffset;
-        meta.uncompressedSize = inputSize;
-        volumeMetadata[vol_idx] = meta;
-        
-        uncompressedOffset += inputSize;
-        totalCompressedSize += outputData.size();
-        
-        // Report progress after this volume completes (scale to 25%-75% range)
-        // Throttled by makeThrottledCallback wrapper, so safe to call.
-        if (callback) {
-            float volumeProgress = (float)(vol_idx + 1) / volumes.size();  // Completed volumes
-            BlockProgressInfo info;
-            info.totalBlocks = static_cast<int>(volumes.size());
-            info.completedBlocks = static_cast<int>(vol_idx + 1);
-            info.currentBlock = static_cast<int>(vol_idx);
-            info.currentBlockSize = volumes[vol_idx].size();
-            info.overallProgress = 0.25f + (volumeProgress * 0.5f);  // 25% to 75%
-            info.currentBlockProgress = 1.0f;
-            double throughputMBps = (inputSize / (1024.0 * 1024.0)) / duration;
-            info.throughputMBps = throughputMBps;
-            info.stage = "compressing";
-            callback(info);
-        }
-        
-        // Cleanup GPU memory for this volume
-        cudaFree(d_input_data);
-        cudaFree(d_input_ptrs);
-        cudaFree(d_input_sizes);
-        cudaFree(d_output_data);
-        cudaFree(d_output_ptrs);
-        cudaFree(d_output_sizes);
-        cudaFree(d_temp);
     }
-    
-    if (verbose) {
-        std::cout << "\r  Processing volume " << volumes.size() << "/" << volumes.size() << "... Done!\n";
-    }
-    
-    // Destroy CUDA stream
-    cudaStreamDestroy(stream);
-    
-    // Report writing stage starting (75%)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(volumes.size());
-        info.completedBlocks = static_cast<int>(volumes.size());
-        info.currentBlock = static_cast<int>(volumes.size() - 1);
-        info.currentBlockSize = 0;
-        info.overallProgress = 0.75f;  // Writing starts at 75%
-        info.currentBlockProgress = 1.0f;
-        info.throughputMBps = 0.0;
-        info.stage = "writing";
-        callback(info);
-    }
-    
-    auto writeStartMv = clock::now();
-    // Write volume files
-    // First volume gets manifest + metadata + compressed data
-    std::string firstVolumeFile = generateVolumeFilename(outputFile, 1);
-    std::vector<uint8_t> firstVolumeOutput;
-    
-    // Add manifest header
-    const uint8_t* manifestBytes = reinterpret_cast<const uint8_t*>(&manifest);
-    firstVolumeOutput.insert(firstVolumeOutput.end(), manifestBytes, manifestBytes + sizeof(VolumeManifest));
-    
-    // Add volume metadata array
-    const uint8_t* metadataBytes = reinterpret_cast<const uint8_t*>(volumeMetadata.data());
-    firstVolumeOutput.insert(firstVolumeOutput.end(), metadataBytes, 
-                            metadataBytes + sizeof(VolumeMetadata) * volumeMetadata.size());
-    
-    // Add first volume compressed data
-    firstVolumeOutput.insert(firstVolumeOutput.end(), 
-                            volumeCompressedData[0].begin(), volumeCompressedData[0].end());
-    
-    writeFile(firstVolumeFile, firstVolumeOutput.data(), firstVolumeOutput.size(), callback);
-    
-    // Update first volume metadata with actual size (including manifest and metadata)
-    volumeMetadata[0].compressedSize = firstVolumeOutput.size();
-    totalCompressedSize = totalCompressedSize - volumeCompressedData[0].size() + firstVolumeOutput.size();
-    
-    // Write remaining volumes (just compressed data)
-    for (size_t i = 1; i < volumes.size(); i++) {
-        std::string volumeFile = generateVolumeFilename(outputFile, i + 1);
-        writeFile(volumeFile, volumeCompressedData[i].data(), volumeCompressedData[i].size(), callback);
-    }
-    auto writeEndMv = clock::now();
-    if (stats) {
-        stats->writeSec += std::chrono::duration<double>(writeEndMv - writeStartMv).count();
-        stats->outputBytes = totalCompressedSize;
-    }
-    
-    // Report completion (100%)
-    if (callback) {
-        BlockProgressInfo info;
-        info.totalBlocks = static_cast<int>(volumes.size());
-        info.completedBlocks = static_cast<int>(volumes.size());
-        info.currentBlock = static_cast<int>(volumes.size() - 1);
-        info.currentBlockSize = 0;
-        info.overallProgress = 1.0f;  // 100% complete
-        info.currentBlockProgress = 1.0f;
-        info.throughputMBps = 0.0;
-        info.stage = "complete";
-        callback(info);
-    }
-    
-    // Print summary
-    std::cout << "\n=== Multi-Volume Compression SUCCESSFUL ===" << std::endl;
-    std::cout << "Volumes created: " << volumes.size() << std::endl;
-    std::cout << "Total uncompressed: " << (totalSize / (1024.0 * 1024.0)) << " MB" << std::endl;
-    std::cout << "Total compressed: " << (totalCompressedSize / (1024.0 * 1024.0)) << " MB" << std::endl;
-    std::cout << "Overall ratio: " << std::fixed << std::setprecision(2) 
-              << (double)totalSize / totalCompressedSize << "x" << std::endl;
-    std::cout << "Total time: " << totalDuration << "s (" 
-              << (totalSize / (1024.0 * 1024.0 * 1024.0)) / totalDuration << " GB/s)" << std::endl;
+    return chunks;
 }
 
-// ============================================================================
-// Streaming volume compression (Phase 3)
-// ============================================================================
+// Pipelined streaming compressor.
 //
-// One reusable host fillBuffer of capacity = maxVolumeSize is filled directly
-// from disk (mmap'd via readFileInto) one file at a time. When it reaches
-// maxVolumeSize the volume is GPU-compressed and either:
-//   - buffered in volume1Buffered (volume index 0) so we can prepend the
-//     manifest+metadata at the end, or
-//   - written straight to disk (volume index >= 1).
+// Three concurrent actors connected by slot queues (PIPELINE_DEPTH pinned
+// sub-batch slots, each with its own CUDA stream):
+//   reader thread : walks `entries`, reads archive bytes from disk straight
+//                   into a free slot's pinned input buffer
+//   GPU (async)   : per slot: H2D -> nvcompBatched*CompressAsync -> chunk
+//                   sizes D2H (event signals completion)
+//   main thread   : submits filled slots, retires the oldest (pack kernel
+//                   compacts chunks, one pinned D2H), appends to the output
+//                   volume, fires progress callbacks
+// Disk reads, compression kernels, and PCIe transfers of different sub-batches
+// overlap; peak VRAM is ~depth x sub-batch working set instead of ~2.1x volume.
 //
-// This eliminates two full archive-sized memcpys (the realloc cascade and the
-// splitIntoVolumes copy) and drops peak RAM from ~12 GB to ~3.5 GB on a
-// 4.7 GB / 2 x 2.5 GB-volume workload. The on-disk volume layout is identical
-// to the in-memory pipeline, so all decompression code is unchanged.
-
-// Compress one volume's bytes on the GPU into a wrapped batched-format output.
-// Allocates and frees device buffers per call; that's fine because volume
-// sizes are large (>>cudaMalloc overhead). `stream` is reused across volumes
-// by the caller. Updates stats->prepareSec and stats->computeSec if non-null.
-static void compressVolumeBatched(AlgoType algo,
-                                  const uint8_t* inputData,
-                                  size_t inputSize,
-                                  cudaStream_t stream,
-                                  std::vector<uint8_t>& outputData,
-                                  CompressionStats* stats) {
-    using clock = std::chrono::steady_clock;
-    auto prepareStart = clock::now();
-
-    size_t chunk_count = (inputSize + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-    // Per-chunk host arrays
-    std::vector<size_t> h_input_sizes(chunk_count);
-    std::vector<void*> h_input_ptrs(chunk_count);
-    for (size_t i = 0; i < chunk_count; i++) {
-        h_input_sizes[i] = std::min(CHUNK_SIZE, inputSize - i * CHUNK_SIZE);
-    }
-
-    // Device input
-    uint8_t* d_input_data;
-    CUDA_CHECK(cudaMalloc(&d_input_data, inputSize));
-    CUDA_CHECK(cudaMemcpyAsync(d_input_data, inputData, inputSize, cudaMemcpyHostToDevice, stream));
-
-    void** d_input_ptrs;
-    size_t* d_input_sizes;
-    CUDA_CHECK(cudaMalloc(&d_input_ptrs, sizeof(void*) * chunk_count));
-    CUDA_CHECK(cudaMalloc(&d_input_sizes, sizeof(size_t) * chunk_count));
-    for (size_t i = 0; i < chunk_count; i++) {
-        h_input_ptrs[i] = d_input_data + i * CHUNK_SIZE;
-    }
-    CUDA_CHECK(cudaMemcpyAsync(d_input_ptrs, h_input_ptrs.data(),
-                               sizeof(void*) * chunk_count, cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_input_sizes, h_input_sizes.data(),
-                               sizeof(size_t) * chunk_count, cudaMemcpyHostToDevice, stream));
-
-    // Algo-specific temp + max output sizing
-    size_t temp_bytes = 0;
-    size_t max_out_bytes = 0;
-    if (algo == ALGO_LZ4) {
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &max_out_bytes));
-    } else if (algo == ALGO_SNAPPY) {
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &max_out_bytes));
-    } else if (algo == ALGO_ZSTD) {
-        NVCOMP_CHECK(nvcompBatchedZstdCompressGetTempSizeAsync(
-            chunk_count, CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &temp_bytes, inputSize));
-        NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
-            CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &max_out_bytes));
-    }
-
-    void* d_temp;
-    CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
-
-    uint8_t* d_output_data;
-    CUDA_CHECK(cudaMalloc(&d_output_data, max_out_bytes * chunk_count));
-
-    void** d_output_ptrs;
-    size_t* d_output_sizes;
-    CUDA_CHECK(cudaMalloc(&d_output_ptrs, sizeof(void*) * chunk_count));
-    CUDA_CHECK(cudaMalloc(&d_output_sizes, sizeof(size_t) * chunk_count));
-
-    std::vector<void*> h_output_ptrs(chunk_count);
-    for (size_t i = 0; i < chunk_count; i++) {
-        h_output_ptrs[i] = d_output_data + i * max_out_bytes;
-    }
-    CUDA_CHECK(cudaMemcpyAsync(d_output_ptrs, h_output_ptrs.data(),
-                               sizeof(void*) * chunk_count, cudaMemcpyHostToDevice, stream));
-
-    auto computeStart = clock::now();
-    if (stats) {
-        stats->prepareSec += std::chrono::duration<double>(computeStart - prepareStart).count();
-    }
-
-    if (algo == ALGO_LZ4) {
-        NVCOMP_CHECK(nvcompBatchedLZ4CompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedLZ4CompressDefaultOpts, nullptr, stream));
-    } else if (algo == ALGO_SNAPPY) {
-        NVCOMP_CHECK(nvcompBatchedSnappyCompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedSnappyCompressDefaultOpts, nullptr, stream));
-    } else if (algo == ALGO_ZSTD) {
-        NVCOMP_CHECK(nvcompBatchedZstdCompressAsync(
-            d_input_ptrs, d_input_sizes, CHUNK_SIZE, chunk_count,
-            d_temp, temp_bytes, d_output_ptrs, d_output_sizes,
-            nvcompBatchedZstdCompressDefaultOpts, nullptr, stream));
-    }
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    auto computeEnd = clock::now();
-    if (stats) {
-        stats->computeSec += std::chrono::duration<double>(computeEnd - computeStart).count();
-    }
-
-    // Read back per-chunk sizes and assemble outputData = BatchedHeader + chunkSizes64[] + chunks.
-    std::vector<size_t> h_output_sizes(chunk_count);
-    CUDA_CHECK(cudaMemcpy(h_output_sizes.data(), d_output_sizes,
-                          sizeof(size_t) * chunk_count, cudaMemcpyDeviceToHost));
-    size_t volumeCompSize = 0;
-    for (size_t i = 0; i < chunk_count; i++) volumeCompSize += h_output_sizes[i];
-
-    outputData.clear();
-    outputData.reserve(sizeof(BatchedHeader) + sizeof(uint64_t) * chunk_count + volumeCompSize);
-
-    BatchedHeader header;
-    header.magic = BATCHED_MAGIC;
-    header.version = BATCHED_VERSION;
-    header.uncompressedSize = inputSize;
-    header.chunkCount = static_cast<uint32_t>(chunk_count);
-    header.chunkSize = CHUNK_SIZE;
-    header.algorithm = static_cast<uint32_t>(algo);
-    header.reserved = 0;
-    const uint8_t* hb = reinterpret_cast<const uint8_t*>(&header);
-    outputData.insert(outputData.end(), hb, hb + sizeof(BatchedHeader));
-
-    std::vector<uint64_t> chunkSizes64(chunk_count);
-    for (size_t i = 0; i < chunk_count; i++) chunkSizes64[i] = h_output_sizes[i];
-    const uint8_t* sb = reinterpret_cast<const uint8_t*>(chunkSizes64.data());
-    outputData.insert(outputData.end(), sb, sb + sizeof(uint64_t) * chunk_count);
-
-    size_t dataStart = outputData.size();
-    outputData.resize(dataStart + volumeCompSize);
-    size_t off = 0;
-    for (size_t i = 0; i < chunk_count; i++) {
-        CUDA_CHECK(cudaMemcpy(outputData.data() + dataStart + off,
-                              h_output_ptrs[i], h_output_sizes[i],
-                              cudaMemcpyDeviceToHost));
-        off += h_output_sizes[i];
-    }
-
-    cudaFree(d_input_data);
-    cudaFree(d_input_ptrs);
-    cudaFree(d_input_sizes);
-    cudaFree(d_output_data);
-    cudaFree(d_output_ptrs);
-    cudaFree(d_output_sizes);
-    cudaFree(d_temp);
-}
-
-// True streaming compressor: walks `entries` once, fills a single host buffer
-// of capacity maxVolumeSize, flushes (compress + write) when full. Volume 1's
-// compressed bytes are kept in RAM until all volumes are done so we can
-// prepend the volume manifest + metadata table (which we don't know until
-// every volume's compressedSize is recorded). Volumes 2..N stream straight to
-// disk with no intermediate buffering.
+// Volume layout on disk is byte-identical to the previous implementation:
+// sub-batch boundaries are CHUNK_SIZE-aligned within a volume and chunk sizes
+// are appended in order, so the NVBC header + size table + chunk stream are
+// unchanged. Volumes 2..N stream to disk through a placeholder size table that
+// is patched via seekp once the volume completes; volume 1 (multi-volume) is
+// buffered in RAM for the manifest prepend, exactly as before.
 static void compressGPUBatchedStreaming(AlgoType algo,
                                         const std::vector<ArchiveEntry>& entries,
                                         const std::string& outputFile,
@@ -913,199 +217,588 @@ static void compressGPUBatchedStreaming(AlgoType algo,
     const bool verbose = isVerbose();
     auto opStart = clock::now();
 
-    // Total uncompressed archive size as it would appear if we built the
-    // whole thing in RAM. Needed for the VolumeManifest field and as the
-    // "input size" reported by stats.
+    // Total uncompressed archive size (VolumeManifest field + stats input).
     uint64_t totalArchiveSize = sizeof(ArchiveHeader);
-    uint64_t totalFileBytes = 0;
     for (const auto& e : entries) {
         totalArchiveSize += sizeof(FileEntry) + e.relativePath.size() + e.fileSize;
-        totalFileBytes += e.fileSize;
     }
+
+    const bool multiVolume = maxVolumeSize > 0 && maxVolumeSize != UINT64_MAX
+                             && totalArchiveSize > maxVolumeSize;
+    auto volBytes = [&](size_t v) -> uint64_t {
+        if (!multiVolume) return v == 0 ? totalArchiveSize : 0;
+        uint64_t off = static_cast<uint64_t>(v) * maxVolumeSize;
+        if (off >= totalArchiveSize) return 0;
+        return std::min<uint64_t>(maxVolumeSize, totalArchiveSize - off);
+    };
+    const size_t volumeCount = multiVolume
+        ? static_cast<size_t>((totalArchiveSize + maxVolumeSize - 1) / maxVolumeSize)
+        : 1;
 
     if (verbose) {
         std::cout << "Using GPU batched compression (" << algoToString(algo)
-                  << ") [streaming]...\n";
+                  << ") [pipelined, " << volumeCount << " volume(s)]...\n";
         std::cout << "Archive size: " << totalArchiveSize << " bytes\n";
     }
-
     if (stats) stats->inputBytes = totalArchiveSize;
 
-    // Reusable host buffer sized to one volume. capacity is set once; only
-    // size() varies as we append/flush. resize(0) preserves capacity.
-    std::vector<uint8_t> fillBuffer;
-    fillBuffer.reserve(static_cast<size_t>(maxVolumeSize));
-
-    std::vector<uint8_t> volume1Buffered;     // first volume waits for manifest prepend
-    std::vector<VolumeMetadata> volumeMetadata;
-    uint64_t totalCompressedBytes = 0;
-    uint64_t uncompressedOffset = 0;
-    size_t volumeIndex = 0;
-
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-
-    auto flushVolume = [&]() {
-        std::vector<uint8_t> compressed;
-        compressVolumeBatched(algo, fillBuffer.data(), fillBuffer.size(),
-                              stream, compressed, stats);
-
-        VolumeMetadata meta;
-        meta.volumeIndex = volumeIndex + 1;
-        meta.compressedSize = compressed.size();  // volume 1 patched after manifest prepend
-        meta.uncompressedOffset = uncompressedOffset;
-        meta.uncompressedSize = fillBuffer.size();
-        volumeMetadata.push_back(meta);
-
-        uncompressedOffset += fillBuffer.size();
-        totalCompressedBytes += compressed.size();
-
-        if (volumeIndex == 0) {
-            volume1Buffered = std::move(compressed);
+    // ---- per-algo query + dispatch -----------------------------------------
+    // Never allocate slots bigger than the whole job (small archives would
+    // otherwise pay pinned-allocation cost for buffers they can't fill).
+    size_t chunksPerSub = std::min<size_t>(
+        subBatchChunksFor(algo),
+        (totalArchiveSize + CHUNK_SIZE - 1) / CHUNK_SIZE);
+    size_t max_out_bytes = 0, temp_bytes = 0;
+    if (algo == ALGO_LZ4) {
+        NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
+            CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &max_out_bytes));
+    } else if (algo == ALGO_SNAPPY) {
+        NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
+            CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &max_out_bytes));
+    } else {
+        NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
+            CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &max_out_bytes));
+    }
+    auto queryTemp = [&](size_t chunks) {
+        size_t t = 0;
+        size_t bytes = chunks * CHUNK_SIZE;
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetTempSizeAsync(
+                chunks, CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &t, bytes));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetTempSizeAsync(
+                chunks, CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &t, bytes));
         } else {
-            auto writeStart = clock::now();
-            std::string filename = generateVolumeFilename(outputFile, volumeIndex + 1);
-            writeFile(filename, compressed.data(), compressed.size());
-            if (stats) stats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
+            NVCOMP_CHECK(nvcompBatchedZstdCompressGetTempSizeAsync(
+                chunks, CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &t, bytes));
         }
-
-        if (verbose) {
-            std::cout << "  Volume " << (volumeIndex + 1)
-                      << " flushed (" << fillBuffer.size() << " B uncompressed -> "
-                      << meta.compressedSize << " B compressed)\n";
-        }
-
-        fillBuffer.resize(0);
-        volumeIndex++;
+        return t;
     };
+    temp_bytes = queryTemp(chunksPerSub);
 
-    // Append `n` bytes from `src` to fillBuffer, flushing when full.
-    auto appendBytes = [&](const uint8_t* src, uint64_t n) {
-        while (n > 0) {
-            uint64_t avail = maxVolumeSize - fillBuffer.size();
-            if (avail == 0) {
-                flushVolume();
-                avail = maxVolumeSize;
+    size_t subBytes = chunksPerSub * CHUNK_SIZE;
+    size_t depth = std::max<size_t>(1, std::min<uint64_t>(
+        PIPELINE_DEPTH, (totalArchiveSize + subBytes - 1) / subBytes));
+
+    // Fit the pipeline into free VRAM: shrink depth first, then sub-batch
+    // size (temp requirements scale with chunk count). Actual footprint per
+    // slot: input (sized for worst-case packed reuse) + strided output + temp.
+    {
+        size_t freeMem = 0, totalMem = 0;
+        if (cudaMemGetInfo(&freeMem, &totalMem) == cudaSuccess) {
+            const uint64_t slack = 256ull << 20;
+            auto pipelineNeed = [&]() -> uint64_t {
+                uint64_t perSlot = 2ull * max_out_bytes * chunksPerSub  // d_in + d_out
+                    + temp_bytes
+                    + 5ull * chunksPerSub * sizeof(size_t);
+                return depth * perSlot + slack;
+            };
+            while (pipelineNeed() > freeMem &&
+                   (depth > 1 || chunksPerSub > 256)) {
+                if (depth > 1) {
+                    depth--;
+                } else {
+                    chunksPerSub /= 2;
+                    temp_bytes = queryTemp(chunksPerSub);
+                }
             }
-            uint64_t take = std::min(avail, n);
-            size_t off = fillBuffer.size();
-            fillBuffer.resize(off + static_cast<size_t>(take));
-            std::memcpy(fillBuffer.data() + off, src, static_cast<size_t>(take));
-            src += take;
-            n -= take;
+            if (verbose && (depth < PIPELINE_DEPTH || chunksPerSub < subBatchChunksFor(algo))) {
+                std::cout << "  VRAM fit: depth=" << depth
+                          << ", sub-batch=" << (chunksPerSub * CHUNK_SIZE >> 20)
+                          << " MB (" << (freeMem >> 20) << " MB free)\n";
+            }
+            subBytes = chunksPerSub * CHUNK_SIZE;
+        } else {
+            cudaGetLastError();
         }
+    }
+    const size_t maxPackedBytes = max_out_bytes * chunksPerSub;
+
+    // ---- pipeline slots -----------------------------------------------------
+    struct Slot {
+        PinnedBuffer h_in;         // sub-batch input, filled by the reader
+        PinnedBuffer h_out;        // packed compressed output
+        PinnedBuffer h_sizes;      // per-chunk compressed sizes (D2H)
+        PinnedBuffer h_offsets;    // per-chunk packed offsets (H2D)
+        DeviceBuffer d_in;         // input; reused as pack destination
+        DeviceBuffer d_out;        // worst-case strided compressed output
+        DeviceBuffer d_temp;
+        DeviceBuffer d_in_ptrs, d_in_sizes, d_out_ptrs, d_out_sizes, d_offsets;
+        std::unique_ptr<CudaStream> stream;
+        std::unique_ptr<CudaEvent> computeDone;
+        bool defaultSizes = true;  // d_in_sizes holds all-CHUNK_SIZE values
+        // descriptor of the filled sub-batch
+        size_t bytes = 0;
+        size_t volumeIdx = 0;
+        bool lastInVolume = false;
     };
+    std::vector<Slot> slots(depth);
+    for (auto& s : slots) {
+        // d_in doubles as the pack destination, so size it for the worst-case
+        // packed output (slightly larger than the input for incompressible data).
+        s.h_in.reserve(subBytes);
+        s.h_out.reserve(maxPackedBytes);
+        s.h_sizes.reserve(sizeof(size_t) * chunksPerSub);
+        s.h_offsets.reserve(sizeof(size_t) * chunksPerSub);
+        s.d_in.reserve(std::max(subBytes, maxPackedBytes));
+        s.d_out.reserve(maxPackedBytes);
+        s.d_temp.reserve(temp_bytes);
+        s.d_in_ptrs.reserve(sizeof(void*) * chunksPerSub);
+        s.d_in_sizes.reserve(sizeof(size_t) * chunksPerSub);
+        s.d_out_ptrs.reserve(sizeof(void*) * chunksPerSub);
+        s.d_out_sizes.reserve(sizeof(size_t) * chunksPerSub);
+        s.d_offsets.reserve(sizeof(size_t) * chunksPerSub);
+        s.stream = std::make_unique<CudaStream>();
+        s.computeDone = std::make_unique<CudaEvent>();
 
-    // 1. ArchiveHeader at the start of the very first volume.
-    ArchiveHeader hdr;
-    hdr.magic = ARCHIVE_MAGIC;
-    hdr.version = ARCHIVE_VERSION;
-    hdr.fileCount = static_cast<uint32_t>(entries.size());
-    hdr.reserved = 0;
-    appendBytes(reinterpret_cast<const uint8_t*>(&hdr), sizeof(ArchiveHeader));
+        // Input/output pointer tables are position-invariant per slot: set once.
+        std::vector<void*> in_ptrs(chunksPerSub), out_ptrs(chunksPerSub);
+        std::vector<size_t> in_sizes(chunksPerSub, CHUNK_SIZE);
+        for (size_t i = 0; i < chunksPerSub; i++) {
+            in_ptrs[i] = s.d_in.bytes() + i * CHUNK_SIZE;
+            out_ptrs[i] = s.d_out.bytes() + i * max_out_bytes;
+        }
+        CUDA_CHECK(cudaMemcpy(s.d_in_ptrs.get(), in_ptrs.data(),
+                              sizeof(void*) * chunksPerSub, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(s.d_out_ptrs.get(), out_ptrs.data(),
+                              sizeof(void*) * chunksPerSub, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(s.d_in_sizes.get(), in_sizes.data(),
+                              sizeof(size_t) * chunksPerSub, cudaMemcpyHostToDevice));
+    }
 
-    // 2. For each entry: FileEntry + path bytes + file bytes.
-    uint64_t processedFileBytes = 0;
-    for (size_t i = 0; i < entries.size(); ++i) {
-        const auto& e = entries[i];
+    // ---- reader thread <-> main thread queues -------------------------------
+    std::mutex mtx;
+    std::condition_variable cvFree, cvFilled;
+    std::deque<size_t> freeSlots, filledSlots;
+    for (size_t i = 0; i < depth; i++) freeSlots.push_back(i);
+    bool readerDone = false;
+    std::atomic<bool> abortFlag{false};
+    std::exception_ptr readerError;
 
-        FileEntry fe;
-        fe.pathLength = static_cast<uint32_t>(e.relativePath.size());
-        fe.fileSize = e.fileSize;
-        appendBytes(reinterpret_cast<const uint8_t*>(&fe), sizeof(FileEntry));
-        appendBytes(reinterpret_cast<const uint8_t*>(e.relativePath.data()),
-                    e.relativePath.size());
+    auto readerFn = [&]() {
+        try {
+            size_t vol = 0;
+            uint64_t volRemaining = volBytes(0);
+            ptrdiff_t cur = -1;
+            size_t curFill = 0;
 
-        if (e.fileSize > 0) {
-            uint64_t avail = maxVolumeSize - fillBuffer.size();
-            if (e.fileSize <= avail) {
-                // Common case: whole file fits in current volume - one mmap'd read.
-                size_t writeOff = fillBuffer.size();
-                fillBuffer.resize(writeOff + static_cast<size_t>(e.fileSize));
-                readFileInto(e.filePath, fillBuffer.data() + writeOff, e.fileSize);
-            } else {
-                // File spans volumes (mid-file split allowed). Open once,
-                // stream in chunks bounded by remaining-volume-capacity.
+            auto acquireSlot = [&]() {
+                std::unique_lock<std::mutex> lk(mtx);
+                cvFree.wait(lk, [&] { return !freeSlots.empty() || abortFlag.load(); });
+                if (abortFlag.load()) throw std::runtime_error("compression aborted");
+                cur = static_cast<ptrdiff_t>(freeSlots.front());
+                freeSlots.pop_front();
+                curFill = 0;
+            };
+            auto emitSlot = [&](bool volEnd) {
+                Slot& s = slots[cur];
+                s.bytes = curFill;
+                s.volumeIdx = vol;
+                s.lastInVolume = volEnd;
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    filledSlots.push_back(static_cast<size_t>(cur));
+                }
+                cvFilled.notify_one();
+                cur = -1;
+                curFill = 0;
+            };
+            // Reserve up to `want` bytes of contiguous slot space (bounded by
+            // slot capacity and the current volume); returns the span.
+            auto reserveSpan = [&](uint64_t want, uint8_t** dst) -> uint64_t {
+                if (cur < 0) acquireSlot();
+                uint64_t take = std::min<uint64_t>(
+                    {want, subBytes - curFill, volRemaining});
+                *dst = slots[cur].h_in.bytes() + curFill;
+                return take;
+            };
+            auto commitSpan = [&](uint64_t took) {
+                curFill += static_cast<size_t>(took);
+                volRemaining -= took;
+                bool volEnd = volRemaining == 0;
+                if (volEnd || curFill == subBytes) {
+                    emitSlot(volEnd);
+                    if (volEnd) {
+                        vol++;
+                        volRemaining = volBytes(vol);
+                    }
+                }
+            };
+            auto putBytes = [&](const uint8_t* src, uint64_t n) {
+                while (n > 0) {
+                    uint8_t* dst = nullptr;
+                    uint64_t take = reserveSpan(n, &dst);
+                    std::memcpy(dst, src, static_cast<size_t>(take));
+                    src += take;
+                    n -= take;
+                    commitSpan(take);
+                }
+            };
+            auto putFile = [&](const ArchiveEntry& e) {
+                if (e.fileSize == 0) return;
+                uint8_t* dst = nullptr;
+                uint64_t take = reserveSpan(e.fileSize, &dst);
+                if (take == e.fileSize) {
+                    // Whole file fits in the current span: one mmap'd read.
+                    readFileInto(e.filePath, dst, e.fileSize);
+                    commitSpan(take);
+                    return;
+                }
+                // File spans slots/volumes: stream it.
                 std::ifstream f(e.filePath, std::ios::binary);
                 if (!f.is_open()) {
                     throw std::runtime_error("Failed to open input file: " + e.filePath.string());
                 }
                 uint64_t remaining = e.fileSize;
                 while (remaining > 0) {
-                    avail = maxVolumeSize - fillBuffer.size();
-                    if (avail == 0) {
-                        flushVolume();
-                        avail = maxVolumeSize;
-                    }
-                    uint64_t take = std::min(avail, remaining);
-                    size_t writeOff = fillBuffer.size();
-                    fillBuffer.resize(writeOff + static_cast<size_t>(take));
-                    if (!f.read(reinterpret_cast<char*>(fillBuffer.data() + writeOff),
+                    take = reserveSpan(remaining, &dst);
+                    if (!f.read(reinterpret_cast<char*>(dst),
                                 static_cast<std::streamsize>(take))) {
                         throw std::runtime_error("Failed to read file: " + e.filePath.string());
                     }
                     remaining -= take;
+                    commitSpan(take);
+                }
+            };
+
+            ArchiveHeader hdr;
+            hdr.magic = ARCHIVE_MAGIC;
+            hdr.version = ARCHIVE_VERSION;
+            hdr.fileCount = static_cast<uint32_t>(entries.size());
+            hdr.reserved = 0;
+            putBytes(reinterpret_cast<const uint8_t*>(&hdr), sizeof(ArchiveHeader));
+
+            for (const auto& e : entries) {
+                if (abortFlag.load()) throw std::runtime_error("compression aborted");
+                FileEntry fe;
+                fe.pathLength = static_cast<uint32_t>(e.relativePath.size());
+                fe.fileSize = e.fileSize;
+                putBytes(reinterpret_cast<const uint8_t*>(&fe), sizeof(FileEntry));
+                putBytes(reinterpret_cast<const uint8_t*>(e.relativePath.data()),
+                         e.relativePath.size());
+                putFile(e);
+                if (verbose) {
+                    std::cout << "  Adding: " << e.relativePath
+                              << " (" << e.fileSize << " bytes)\n";
                 }
             }
+            // The archive stream ends exactly at the last volume boundary, so
+            // the final emitSlot(volEnd=true) already fired inside commitSpan.
+        } catch (...) {
+            readerError = std::current_exception();
+            abortFlag.store(true);
         }
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            readerDone = true;
+        }
+        cvFilled.notify_all();
+    };
 
-        processedFileBytes += e.fileSize;
+    // ---- GPU submit / retire -------------------------------------------------
+    auto submitSlot = [&](Slot& s) {
+        size_t chunk_count = (s.bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        cudaStream_t st = *s.stream;
+        CUDA_CHECK(cudaMemcpyAsync(s.d_in.get(), s.h_in.bytes(), s.bytes,
+                                   cudaMemcpyHostToDevice, st));
+        if (s.bytes < subBytes) {
+            // Partial sub-batch (volume tail): last chunk may be short.
+            std::vector<size_t> sizes(chunk_count, CHUNK_SIZE);
+            sizes[chunk_count - 1] = s.bytes - (chunk_count - 1) * CHUNK_SIZE;
+            CUDA_CHECK(cudaMemcpyAsync(s.d_in_sizes.get(), sizes.data(),
+                                       sizeof(size_t) * chunk_count,
+                                       cudaMemcpyHostToDevice, st));
+            s.defaultSizes = false;
+        } else if (!s.defaultSizes) {
+            std::vector<size_t> sizes(chunksPerSub, CHUNK_SIZE);
+            CUDA_CHECK(cudaMemcpyAsync(s.d_in_sizes.get(), sizes.data(),
+                                       sizeof(size_t) * chunksPerSub,
+                                       cudaMemcpyHostToDevice, st));
+            s.defaultSizes = true;
+        }
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressAsync(
+                s.d_in_ptrs.get<void*>(), s.d_in_sizes.get<size_t>(), CHUNK_SIZE, chunk_count,
+                s.d_temp.get(), temp_bytes, s.d_out_ptrs.get<void*>(), s.d_out_sizes.get<size_t>(),
+                nvcompBatchedLZ4CompressDefaultOpts, nullptr, st));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressAsync(
+                s.d_in_ptrs.get<void*>(), s.d_in_sizes.get<size_t>(), CHUNK_SIZE, chunk_count,
+                s.d_temp.get(), temp_bytes, s.d_out_ptrs.get<void*>(), s.d_out_sizes.get<size_t>(),
+                nvcompBatchedSnappyCompressDefaultOpts, nullptr, st));
+        } else {
+            NVCOMP_CHECK(nvcompBatchedZstdCompressAsync(
+                s.d_in_ptrs.get<void*>(), s.d_in_sizes.get<size_t>(), CHUNK_SIZE, chunk_count,
+                s.d_temp.get(), temp_bytes, s.d_out_ptrs.get<void*>(), s.d_out_sizes.get<size_t>(),
+                nvcompBatchedZstdCompressDefaultOpts, nullptr, st));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(s.h_sizes.bytes(), s.d_out_sizes.get(),
+                                   sizeof(size_t) * chunk_count,
+                                   cudaMemcpyDeviceToHost, st));
+        CUDA_CHECK(cudaEventRecord(*s.computeDone, st));
+    };
+
+    // ---- writer state (main thread) -----------------------------------------
+    std::vector<VolumeMetadata> volumeMetadata;
+    std::vector<uint64_t> volume1Sizes;   // multi-volume: volume 1 buffered in RAM
+    std::vector<uint8_t> volume1Data;
+    std::ofstream volFile;
+    std::vector<uint64_t> volSizeTable;
+    size_t volExpectedChunks = 0;
+    size_t curWriteVol = SIZE_MAX;
+    uint64_t uncompressedOffset = 0;
+    uint64_t totalCompressedBytes = 0;
+    uint64_t bytesRetired = 0;
+    double writeSec = 0.0;
+    std::vector<std::string> createdFiles;
+
+    auto makeHeader = [&](size_t vol) {
+        BatchedHeader h;
+        h.magic = BATCHED_MAGIC;
+        h.version = BATCHED_VERSION;
+        h.uncompressedSize = volBytes(vol);
+        h.chunkCount = static_cast<uint32_t>((volBytes(vol) + CHUNK_SIZE - 1) / CHUNK_SIZE);
+        h.chunkSize = CHUNK_SIZE;
+        h.algorithm = static_cast<uint32_t>(algo);
+        h.reserved = 0;
+        return h;
+    };
+
+    auto beginVolume = [&](size_t vol) {
+        curWriteVol = vol;
+        volExpectedChunks = (volBytes(vol) + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        if (multiVolume && vol == 0) {
+            volume1Sizes.clear();
+            volume1Data.clear();
+            return;
+        }
+        std::string name = multiVolume ? generateVolumeFilename(outputFile, vol + 1)
+                                       : outputFile;
+        volFile.open(fs::path(name), std::ios::binary | std::ios::trunc);
+        if (!volFile.is_open()) {
+            throw std::runtime_error("Failed to create output file: " + name);
+        }
+        createdFiles.push_back(name);
+        BatchedHeader h = makeHeader(vol);
+        volFile.write(reinterpret_cast<const char*>(&h), sizeof(h));
+        // Placeholder size table, patched when the volume completes.
+        std::vector<uint64_t> zeros(volExpectedChunks, 0);
+        volFile.write(reinterpret_cast<const char*>(zeros.data()),
+                      sizeof(uint64_t) * volExpectedChunks);
+        volSizeTable.clear();
+        volSizeTable.reserve(volExpectedChunks);
+    };
+
+    auto finishVolume = [&](size_t vol) {
+        VolumeMetadata meta;
+        meta.volumeIndex = vol + 1;
+        meta.uncompressedOffset = uncompressedOffset;
+        meta.uncompressedSize = volBytes(vol);
+        if (multiVolume && vol == 0) {
+            meta.compressedSize = sizeof(BatchedHeader)
+                + sizeof(uint64_t) * volume1Sizes.size() + volume1Data.size();
+        } else {
+            if (volSizeTable.size() != volExpectedChunks) {
+                throw std::runtime_error("Internal error: volume chunk count mismatch");
+            }
+            volFile.seekp(sizeof(BatchedHeader), std::ios::beg);
+            volFile.write(reinterpret_cast<const char*>(volSizeTable.data()),
+                          sizeof(uint64_t) * volSizeTable.size());
+            volFile.close();
+            uint64_t dataBytes = 0;
+            for (uint64_t sz : volSizeTable) dataBytes += sz;
+            meta.compressedSize = sizeof(BatchedHeader)
+                + sizeof(uint64_t) * volSizeTable.size() + dataBytes;
+        }
+        volumeMetadata.push_back(meta);
+        uncompressedOffset += meta.uncompressedSize;
+        totalCompressedBytes += meta.compressedSize;
         if (verbose) {
-            std::cout << "  Adding: " << e.relativePath
-                      << " (" << e.fileSize << " bytes)\n";
+            std::cout << "  Volume " << (vol + 1) << " complete ("
+                      << meta.uncompressedSize << " B -> "
+                      << meta.compressedSize << " B)\n";
+        }
+        curWriteVol = SIZE_MAX;
+    };
+
+    auto retireSlot = [&](size_t idx) {
+        Slot& s = slots[idx];
+        CUDA_CHECK(cudaEventSynchronize(*s.computeDone));
+        size_t chunk_count = (s.bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        cudaStream_t st = *s.stream;
+
+        // Host exclusive-scan of compressed sizes -> packed offsets.
+        const size_t* csizes = reinterpret_cast<const size_t*>(s.h_sizes.bytes());
+        size_t* offs = reinterpret_cast<size_t*>(s.h_offsets.bytes());
+        size_t packed = 0;
+        for (size_t i = 0; i < chunk_count; i++) {
+            offs[i] = packed;
+            packed += csizes[i];
+        }
+        CUDA_CHECK(cudaMemcpyAsync(s.d_offsets.get(), offs,
+                                   sizeof(size_t) * chunk_count,
+                                   cudaMemcpyHostToDevice, st));
+        packChunksKernel<<<static_cast<unsigned>(chunk_count), 256, 0, st>>>(
+            s.d_out_ptrs.get<const void* const>(), s.d_out_sizes.get<size_t>(),
+            s.d_offsets.get<size_t>(), s.d_in.bytes(), chunk_count);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpyAsync(s.h_out.bytes(), s.d_in.bytes(), packed,
+                                   cudaMemcpyDeviceToHost, st));
+        CUDA_CHECK(cudaStreamSynchronize(st));
+
+        // Append to the current volume (writer role).
+        if (s.volumeIdx != curWriteVol) beginVolume(s.volumeIdx);
+        auto writeStart = clock::now();
+        if (multiVolume && s.volumeIdx == 0) {
+            volume1Sizes.insert(volume1Sizes.end(), csizes, csizes + chunk_count);
+            volume1Data.insert(volume1Data.end(), s.h_out.bytes(), s.h_out.bytes() + packed);
+        } else {
+            volSizeTable.insert(volSizeTable.end(), csizes, csizes + chunk_count);
+            volFile.write(reinterpret_cast<const char*>(s.h_out.bytes()),
+                          static_cast<std::streamsize>(packed));
+            if (!volFile) {
+                throw std::runtime_error("Failed to write output volume");
+            }
+        }
+        bytesRetired += s.bytes;
+        bool volEnd = s.lastInVolume;
+        size_t volIdx = s.volumeIdx;
+        writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
+
+        // Slot is free again.
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            freeSlots.push_back(idx);
+        }
+        cvFree.notify_one();
+
+        if (volEnd) {
+            auto ws = clock::now();
+            finishVolume(volIdx);
+            writeSec += std::chrono::duration<double>(clock::now() - ws).count();
         }
 
-        // Throttled progress: scale to 0-75% range while we're filling+compressing.
-        if (callback && totalFileBytes > 0) {
-            float p = static_cast<float>(processedFileBytes) / totalFileBytes;
+        if (callback && totalArchiveSize > 0) {
+            float p = static_cast<float>(bytesRetired) / totalArchiveSize;
             BlockProgressInfo info;
-            info.totalBlocks = static_cast<int>(entries.size());
-            info.completedBlocks = static_cast<int>(i + 1);
-            info.currentBlock = static_cast<int>(i);
-            info.currentBlockSize = e.fileSize;
+            info.totalBlocks = static_cast<int>(
+                (totalArchiveSize + subBytes - 1) / subBytes);
+            info.completedBlocks = static_cast<int>(
+                (bytesRetired + subBytes - 1) / subBytes);
+            info.currentBlock = info.completedBlocks > 0 ? info.completedBlocks - 1 : 0;
+            info.currentBlockSize = s.bytes;
             info.overallProgress = p * 0.75f;
             info.currentBlockProgress = 1.0f;
-            info.throughputMBps = 0.0;
+            double elapsed = std::chrono::duration<double>(clock::now() - opStart).count();
+            info.throughputMBps = elapsed > 0
+                ? (bytesRetired / (1024.0 * 1024.0)) / elapsed : 0.0;
             info.stage = "compressing";
             callback(info);
         }
+    };
+
+    // ---- pump ----------------------------------------------------------------
+    std::thread reader(readerFn);
+    std::deque<size_t> inFlight;
+    auto pumpStart = clock::now();
+    try {
+        while (true) {
+            size_t idx = SIZE_MAX;
+            {
+                std::unique_lock<std::mutex> lk(mtx);
+                cvFilled.wait(lk, [&] {
+                    return !filledSlots.empty() || readerDone || abortFlag.load();
+                });
+                if (abortFlag.load() && filledSlots.empty()) break;
+                if (!filledSlots.empty()) {
+                    idx = filledSlots.front();
+                    filledSlots.pop_front();
+                } else if (readerDone) {
+                    break;
+                }
+            }
+            if (idx != SIZE_MAX) {
+                submitSlot(slots[idx]);
+                inFlight.push_back(idx);
+                if (inFlight.size() >= depth) {
+                    retireSlot(inFlight.front());
+                    inFlight.pop_front();
+                }
+            }
+        }
+        while (!inFlight.empty()) {
+            retireSlot(inFlight.front());
+            inFlight.pop_front();
+        }
+    } catch (...) {
+        abortFlag.store(true);
+        cvFree.notify_all();
+        cvFilled.notify_all();
+        reader.join();
+        if (volFile.is_open()) volFile.close();
+        for (const auto& f : createdFiles) {
+            std::error_code ec;
+            fs::remove(fs::path(f), ec);
+        }
+        throw;
+    }
+    reader.join();
+    if (readerError) {
+        if (volFile.is_open()) volFile.close();
+        for (const auto& f : createdFiles) {
+            std::error_code ec;
+            fs::remove(fs::path(f), ec);
+        }
+        std::rethrow_exception(readerError);
+    }
+    if (stats) {
+        double pumpSec = std::chrono::duration<double>(clock::now() - pumpStart).count();
+        // Disk reads overlap compression in this pipeline, so "compute" covers
+        // the whole overlapped fill+compress region; write time is separate.
+        stats->computeSec += std::max(0.0, pumpSec - writeSec);
+        stats->writeSec += writeSec;
     }
 
-    // 3. Flush final partial volume (if any).
-    if (!fillBuffer.empty()) {
-        flushVolume();
-    }
-    cudaStreamDestroy(stream);
-
-    // 4. Build manifest, prepend it + the metadata array to volume 1's buffered
-    //    compressed bytes, and write volume 1 to disk last.
+    // ---- multi-volume: write volume 1 (manifest + metadata + NVBC) last ------
     auto writeStart = clock::now();
-    VolumeManifest manifest;
-    manifest.magic = VOLUME_MAGIC;
-    manifest.version = VOLUME_VERSION;
-    manifest.volumeCount = static_cast<uint32_t>(volumeMetadata.size());
-    manifest.algorithm = static_cast<uint32_t>(algo);
-    manifest.volumeSize = maxVolumeSize;
-    manifest.totalUncompressedSize = totalArchiveSize;
-    manifest.reserved = 0;
+    if (multiVolume) {
+        VolumeManifest manifest;
+        manifest.magic = VOLUME_MAGIC;
+        manifest.version = VOLUME_VERSION;
+        manifest.volumeCount = static_cast<uint32_t>(volumeMetadata.size());
+        manifest.algorithm = static_cast<uint32_t>(algo);
+        manifest.volumeSize = maxVolumeSize;
+        manifest.totalUncompressedSize = totalArchiveSize;
+        manifest.reserved = 0;
 
-    std::vector<uint8_t> volume1OnDisk;
-    volume1OnDisk.reserve(sizeof(VolumeManifest)
-                          + sizeof(VolumeMetadata) * volumeMetadata.size()
-                          + volume1Buffered.size());
-    const uint8_t* mb = reinterpret_cast<const uint8_t*>(&manifest);
-    volume1OnDisk.insert(volume1OnDisk.end(), mb, mb + sizeof(VolumeManifest));
-    const uint8_t* vmb = reinterpret_cast<const uint8_t*>(volumeMetadata.data());
-    volume1OnDisk.insert(volume1OnDisk.end(), vmb,
-                         vmb + sizeof(VolumeMetadata) * volumeMetadata.size());
-    volume1OnDisk.insert(volume1OnDisk.end(),
-                         volume1Buffered.begin(), volume1Buffered.end());
+        std::vector<uint8_t> volume1OnDisk;
+        BatchedHeader h1 = makeHeader(0);
+        volume1OnDisk.reserve(sizeof(VolumeManifest)
+                              + sizeof(VolumeMetadata) * volumeMetadata.size()
+                              + sizeof(BatchedHeader)
+                              + sizeof(uint64_t) * volume1Sizes.size()
+                              + volume1Data.size());
+        const uint8_t* mb = reinterpret_cast<const uint8_t*>(&manifest);
+        volume1OnDisk.insert(volume1OnDisk.end(), mb, mb + sizeof(VolumeManifest));
+        const uint8_t* vmb = reinterpret_cast<const uint8_t*>(volumeMetadata.data());
+        volume1OnDisk.insert(volume1OnDisk.end(), vmb,
+                             vmb + sizeof(VolumeMetadata) * volumeMetadata.size());
+        const uint8_t* hb = reinterpret_cast<const uint8_t*>(&h1);
+        volume1OnDisk.insert(volume1OnDisk.end(), hb, hb + sizeof(BatchedHeader));
+        const uint8_t* sb = reinterpret_cast<const uint8_t*>(volume1Sizes.data());
+        volume1OnDisk.insert(volume1OnDisk.end(), sb,
+                             sb + sizeof(uint64_t) * volume1Sizes.size());
+        volume1OnDisk.insert(volume1OnDisk.end(),
+                             volume1Data.begin(), volume1Data.end());
 
-    // Patch totalCompressedBytes for the larger volume 1.
-    totalCompressedBytes = totalCompressedBytes - volume1Buffered.size() + volume1OnDisk.size();
+        // Volume 1's on-disk size includes the manifest + metadata prepend.
+        totalCompressedBytes = totalCompressedBytes
+            - volumeMetadata[0].compressedSize + volume1OnDisk.size();
+        volumeMetadata[0].compressedSize = volume1OnDisk.size();
 
-    std::string firstVolumeFile = generateVolumeFilename(outputFile, 1);
-    writeFile(firstVolumeFile, volume1OnDisk.data(), volume1OnDisk.size());
+        std::string firstVolumeFile = generateVolumeFilename(outputFile, 1);
+        writeFile(firstVolumeFile, volume1OnDisk.data(), volume1OnDisk.size());
+    }
     if (stats) {
         stats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
         stats->outputBytes = totalCompressedBytes;
@@ -1125,63 +818,32 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         callback(info);
     }
 
-    // Always-on result summary (matches the in-memory pipeline's output).
-    double totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
-    std::cout << "\n=== Multi-Volume Compression SUCCESSFUL ===" << std::endl;
-    std::cout << "Volumes created: " << volumeMetadata.size() << std::endl;
-    std::cout << "Total uncompressed: " << (totalArchiveSize / (1024.0 * 1024.0)) << " MB" << std::endl;
-    std::cout << "Total compressed: " << (totalCompressedBytes / (1024.0 * 1024.0)) << " MB" << std::endl;
-    if (totalCompressedBytes > 0) {
-        std::cout << "Overall ratio: " << std::fixed << std::setprecision(2)
-                  << (double)totalArchiveSize / totalCompressedBytes << "x" << std::endl;
+    if (multiVolume) {
+        // Always-on result summary (matches the previous pipeline's output).
+        double totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
+        std::cout << "\n=== Multi-Volume Compression SUCCESSFUL ===" << std::endl;
+        std::cout << "Volumes created: " << volumeMetadata.size() << std::endl;
+        std::cout << "Total uncompressed: " << (totalArchiveSize / (1024.0 * 1024.0)) << " MB" << std::endl;
+        std::cout << "Total compressed: " << (totalCompressedBytes / (1024.0 * 1024.0)) << " MB" << std::endl;
+        if (totalCompressedBytes > 0) {
+            std::cout << "Overall ratio: " << std::fixed << std::setprecision(2)
+                      << (double)totalArchiveSize / totalCompressedBytes << "x" << std::endl;
+        }
+        std::cout << "Total time: " << totalSec << "s ("
+                  << (totalArchiveSize / (1024.0 * 1024.0 * 1024.0)) / std::max(totalSec, 1e-9) << " GB/s)" << std::endl;
     }
-    std::cout << "Total time: " << totalSec << "s ("
-              << (totalArchiveSize / (1024.0 * 1024.0 * 1024.0)) / std::max(totalSec, 1e-9) << " GB/s)" << std::endl;
 }
 
-// Should we route this compression through the streaming pipeline?
-// Streaming is only worth it for true multi-volume work; for everything else
-// the in-memory path (createArchive* + compressGPUBatchedFromBuffer) is fine
-// and already benefits from Phase 1's reserve+direct-read changes.
-static inline bool shouldStreamMultiVolume(uint64_t totalArchiveSize, uint64_t maxVolumeSize) {
-    return maxVolumeSize > 0
-        && maxVolumeSize != UINT64_MAX
-        && totalArchiveSize > maxVolumeSize;
-}
-
-// Public wrapper for single file/folder compression
+// Public wrapper for single file/folder compression. All GPU-batched
+// compression (single-volume, --no-volumes, and multi-volume) routes through
+// the pipelined streaming compressor: a single volume is simply one volume.
 void compressGPUBatched(AlgoType algo, const std::string& inputPath, const std::string& outputFile, uint64_t maxVolumeSize, ProgressCallback callback, CompressionStats* outStats) {
     using clock = std::chrono::steady_clock;
     auto opStart = clock::now();
     auto throttled = makeThrottledCallback(callback);
 
-    // Walk inputs once to decide single-volume vs streaming. collectArchiveEntries
-    // is cheap (stat + relative-path build per file), so it's fine to call even
-    // if we end up using the in-memory path next.
     auto entries = collectArchiveEntries(inputPath);
-    uint64_t totalArchiveSize = sizeof(ArchiveHeader);
-    for (const auto& e : entries) {
-        totalArchiveSize += sizeof(FileEntry) + e.relativePath.size() + e.fileSize;
-    }
-
-    if (shouldStreamMultiVolume(totalArchiveSize, maxVolumeSize)) {
-        compressGPUBatchedStreaming(algo, entries, outputFile, maxVolumeSize, throttled, outStats);
-    } else {
-        auto readStart = clock::now();
-        std::vector<uint8_t> archiveData;
-        if (isDirectory(inputPath)) {
-            archiveData = createArchiveFromFolder(inputPath, throttled);
-        } else {
-            archiveData = createArchiveFromFile(inputPath, throttled);
-        }
-        auto readEnd = clock::now();
-        if (outStats) {
-            outStats->readSec += std::chrono::duration<double>(readEnd - readStart).count();
-            outStats->inputBytes = archiveData.size();
-        }
-
-        compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize, callback, outStats);
-    }
+    compressGPUBatchedStreaming(algo, entries, outputFile, maxVolumeSize, throttled, outStats);
 
     if (outStats) {
         outStats->totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
@@ -1200,24 +862,7 @@ void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& f
     }
 
     auto entries = collectArchiveEntriesFromList(filePaths);
-    uint64_t totalArchiveSize = sizeof(ArchiveHeader);
-    for (const auto& e : entries) {
-        totalArchiveSize += sizeof(FileEntry) + e.relativePath.size() + e.fileSize;
-    }
-
-    if (shouldStreamMultiVolume(totalArchiveSize, maxVolumeSize)) {
-        compressGPUBatchedStreaming(algo, entries, outputFile, maxVolumeSize, throttled, outStats);
-    } else {
-        auto readStart = clock::now();
-        std::vector<uint8_t> archiveData = createArchiveFromFileList(filePaths, throttled);
-        auto readEnd = clock::now();
-        if (outStats) {
-            outStats->readSec += std::chrono::duration<double>(readEnd - readStart).count();
-            outStats->inputBytes = archiveData.size();
-        }
-
-        compressGPUBatchedFromBuffer(algo, archiveData, outputFile, maxVolumeSize, callback, outStats);
-    }
+    compressGPUBatchedStreaming(algo, entries, outputFile, maxVolumeSize, throttled, outStats);
 
     if (outStats) {
         outStats->totalSec = std::chrono::duration<double>(clock::now() - opStart).count();
@@ -1229,6 +874,316 @@ void compressGPUBatchedFileList(AlgoType algo, const std::vector<std::string>& f
 // ============================================================================
 // GPU Batched Decompression
 // ============================================================================
+
+// Pipelined GPU decompressor for NVBC files. Constructed once per operation
+// and reused across volumes (buffers, streams, and temp space allocated once).
+//
+// Per volume, the chunk-size table gives the exact compressed byte range and
+// the exact uncompressed size of every sub-batch up front, so each slot's
+// whole chain (H2D -> nvcompBatched*DecompressAsync -> statuses/actual D2H ->
+// output D2H -> event) is enqueued in one go. The main thread reads the next
+// sub-batch from disk while previous slots decompress on their own streams --
+// disk, PCIe, and decompression overlap with no extra threads.
+//
+// Any ineligibility (CPU-compressed single-chunk files, unexpected chunk size,
+// oversized chunks) or GPU failure returns false; the caller falls back to
+// decompressBatchedFormatCPU exactly as before, so old archives cannot break.
+// nvCOMP 5.1 decompress alignment requirements are 1 byte for LZ4/Snappy/Zstd
+// inputs/outputs (verified via GetRequiredAlignments), so compressed chunk
+// pointers can point directly at NVBC's back-to-back chunk layout.
+class BatchedDecompressPipeline {
+public:
+    // Appends the decompressed payload of the NVBC stream at `payloadOffset`
+    // in `path` onto `out`. Returns false -> caller uses the CPU path.
+    bool decompressFile(const std::string& path, uint64_t payloadOffset,
+                        std::vector<uint8_t>& out) {
+        std::ifstream f(fs::path(path), std::ios::binary);
+        if (!f.is_open()) return false;
+        f.seekg(static_cast<std::streamoff>(payloadOffset));
+
+        BatchedHeader header;
+        if (!f.read(reinterpret_cast<char*>(&header), sizeof(header))) return false;
+        if (header.magic != BATCHED_MAGIC) return false;
+        AlgoType algo = static_cast<AlgoType>(header.algorithm);
+        if (algo != ALGO_LZ4 && algo != ALGO_SNAPPY && algo != ALGO_ZSTD) return false;
+        const size_t n = header.chunkCount;
+        if (n <= 1 || header.chunkSize != CHUNK_SIZE) return false;
+        if (header.uncompressedSize == 0 ||
+            header.uncompressedSize > (uint64_t)n * CHUNK_SIZE) return false;
+        // Small payloads decode faster on the CPU than the one-time CUDA
+        // context/pipeline setup costs (~150 ms) -- unless this pipeline is
+        // already warm from a previous volume of the same operation.
+        if (!ready_ && header.uncompressedSize < (64ull << 20)) return false;
+
+        std::vector<uint64_t> sizes(n);
+        if (!f.read(reinterpret_cast<char*>(sizes.data()), sizeof(uint64_t) * n)) {
+            return false;
+        }
+
+        try {
+            if (!ensureResources(algo, n)) return false;
+            for (uint64_t sz : sizes) {
+                if (sz == 0 || sz > maxCompChunk_) return false; // corrupt/foreign
+            }
+
+            out.reserve(out.size() + header.uncompressedSize);
+
+            const size_t numSub = (n + chunksPerSub_ - 1) / chunksPerSub_;
+            size_t retired = 0;   // count of retired sub-batches
+            size_t submitted = 0;
+            for (size_t sb = 0; sb < numSub; sb++) {
+                Slot& s = slots_[sb % depth_];
+                if (s.inFlight) {
+                    retireSlot(s, out);
+                    retired++;
+                }
+                const size_t c0 = sb * chunksPerSub_;
+                const size_t cn = std::min(chunksPerSub_, n - c0);
+                uint64_t compBytes = 0;
+                for (size_t i = 0; i < cn; i++) compBytes += sizes[c0 + i];
+                // Disk read overlaps the other slots' in-flight GPU work.
+                if (!f.read(reinterpret_cast<char*>(s.h_in.bytes()),
+                            static_cast<std::streamsize>(compBytes))) {
+                    throw std::runtime_error("short read in " + path);
+                }
+                submitSlot(s, algo, &sizes[c0], cn,
+                           subUncompBytes(header, c0, cn), compBytes);
+                submitted++;
+            }
+            for (size_t sb = retired; sb < submitted; sb++) {
+                Slot& s = slots_[sb % depth_];
+                if (s.inFlight) retireSlot(s, out);
+            }
+            return true;
+        } catch (const std::exception& e) {
+            std::cerr << "GPU decompression failed (" << e.what()
+                      << "); falling back to CPU\n";
+            quiesce();
+            return false;
+        }
+    }
+
+private:
+    struct Slot {
+        PinnedBuffer h_in, h_out;
+        PinnedBuffer h_in_ptrs, h_in_sizes, h_out_sizes; // staging for tables
+        PinnedBuffer h_statuses, h_actual;
+        DeviceBuffer d_in, d_out, d_temp;
+        DeviceBuffer d_in_ptrs, d_in_sizes, d_out_ptrs, d_out_sizes;
+        DeviceBuffer d_statuses, d_actual;
+        std::unique_ptr<CudaStream> stream;
+        std::unique_ptr<CudaEvent> done;
+        bool inFlight = false;
+        size_t chunkCount = 0;
+        size_t uncompBytes = 0;
+    };
+
+    static uint64_t subUncompBytes(const BatchedHeader& h, size_t c0, size_t cn) {
+        uint64_t end = std::min<uint64_t>((uint64_t)(c0 + cn) * CHUNK_SIZE,
+                                          h.uncompressedSize);
+        return end - (uint64_t)c0 * CHUNK_SIZE;
+    }
+
+    bool ensureResources(AlgoType algo, size_t totalChunks) {
+        // Slots never need to exceed the volume's chunk count (small archives
+        // shouldn't pay full-size pinned allocations). Grow-only across
+        // volumes of one operation.
+        size_t wantChunks = std::min(subBatchChunksFor(algo), totalChunks);
+        if (ready_ && algo == algo_ && wantChunks <= chunksPerSub_) return true;
+        int deviceCount = 0;
+        if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
+            cudaGetLastError();
+            return false;
+        }
+        ready_ = false;
+        algo_ = algo;
+        chunksPerSub_ = wantChunks;
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4CompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedLZ4CompressDefaultOpts, &maxCompChunk_));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyCompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedSnappyCompressDefaultOpts, &maxCompChunk_));
+        } else {
+            NVCOMP_CHECK(nvcompBatchedZstdCompressGetMaxOutputChunkSize(
+                CHUNK_SIZE, nvcompBatchedZstdCompressDefaultOpts, &maxCompChunk_));
+        }
+        auto queryTemp = [&](size_t chunks) {
+            size_t t = 0;
+            size_t bytes = chunks * CHUNK_SIZE;
+            if (algo == ALGO_LZ4) {
+                NVCOMP_CHECK(nvcompBatchedLZ4DecompressGetTempSizeAsync(
+                    chunks, CHUNK_SIZE, nvcompBatchedLZ4DecompressDefaultOpts, &t, bytes));
+            } else if (algo == ALGO_SNAPPY) {
+                NVCOMP_CHECK(nvcompBatchedSnappyDecompressGetTempSizeAsync(
+                    chunks, CHUNK_SIZE, nvcompBatchedSnappyDecompressDefaultOpts, &t, bytes));
+            } else {
+                NVCOMP_CHECK(nvcompBatchedZstdDecompressGetTempSizeAsync(
+                    chunks, CHUNK_SIZE, nvcompBatchedZstdDecompressDefaultOpts, &t, bytes));
+            }
+            return t;
+        };
+        tempBytes_ = queryTemp(chunksPerSub_);
+        depth_ = PIPELINE_DEPTH;
+
+        // Fit into free VRAM: shrink depth, then sub-batch size. Bail out to
+        // the CPU path when even the minimum footprint doesn't fit.
+        {
+            size_t freeMem = 0, totalMem = 0;
+            if (cudaMemGetInfo(&freeMem, &totalMem) != cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
+            const uint64_t slack = 256ull << 20;
+            auto need = [&]() -> uint64_t {
+                uint64_t perSlot = (uint64_t)maxCompChunk_ * chunksPerSub_   // d_in
+                    + (uint64_t)chunksPerSub_ * CHUNK_SIZE                   // d_out
+                    + tempBytes_
+                    + 6ull * chunksPerSub_ * sizeof(size_t);
+                return depth_ * perSlot + slack;
+            };
+            while (need() > freeMem && (depth_ > 1 || chunksPerSub_ > 256)) {
+                if (depth_ > 1) {
+                    depth_--;
+                } else {
+                    chunksPerSub_ /= 2;
+                    tempBytes_ = queryTemp(chunksPerSub_);
+                }
+            }
+            if (need() > freeMem) {
+                if (isVerbose()) {
+                    std::cout << "GPU decompression pipeline needs ~"
+                              << (need() >> 20) << " MB VRAM, "
+                              << (freeMem >> 20) << " MB free; using CPU\n";
+                }
+                return false;
+            }
+        }
+        const size_t subBytes = chunksPerSub_ * CHUNK_SIZE;
+        slots_.clear();
+        slots_.resize(depth_);
+        for (auto& s : slots_) {
+            s.h_in.reserve(maxCompChunk_ * chunksPerSub_);
+            s.h_out.reserve(subBytes);
+            s.h_in_ptrs.reserve(sizeof(void*) * chunksPerSub_);
+            s.h_in_sizes.reserve(sizeof(size_t) * chunksPerSub_);
+            s.h_out_sizes.reserve(sizeof(size_t) * chunksPerSub_);
+            s.h_statuses.reserve(sizeof(nvcompStatus_t) * chunksPerSub_);
+            s.h_actual.reserve(sizeof(size_t) * chunksPerSub_);
+            s.d_in.reserve(maxCompChunk_ * chunksPerSub_);
+            s.d_out.reserve(subBytes);
+            s.d_temp.reserve(tempBytes_);
+            s.d_in_ptrs.reserve(sizeof(void*) * chunksPerSub_);
+            s.d_in_sizes.reserve(sizeof(size_t) * chunksPerSub_);
+            s.d_out_ptrs.reserve(sizeof(void*) * chunksPerSub_);
+            s.d_out_sizes.reserve(sizeof(size_t) * chunksPerSub_);
+            s.d_statuses.reserve(sizeof(nvcompStatus_t) * chunksPerSub_);
+            s.d_actual.reserve(sizeof(size_t) * chunksPerSub_);
+            s.stream = std::make_unique<CudaStream>();
+            s.done = std::make_unique<CudaEvent>();
+            // Output chunk pointers are position-invariant per slot.
+            std::vector<void*> out_ptrs(chunksPerSub_);
+            for (size_t i = 0; i < chunksPerSub_; i++) {
+                out_ptrs[i] = s.d_out.bytes() + i * CHUNK_SIZE;
+            }
+            CUDA_CHECK(cudaMemcpy(s.d_out_ptrs.get(), out_ptrs.data(),
+                                  sizeof(void*) * chunksPerSub_, cudaMemcpyHostToDevice));
+        }
+        ready_ = true;
+        return true;
+    }
+
+    void submitSlot(Slot& s, AlgoType algo, const uint64_t* chunkSizes,
+                    size_t cn, uint64_t uncompBytes, uint64_t compBytes) {
+        cudaStream_t st = *s.stream;
+        CUDA_CHECK(cudaMemcpyAsync(s.d_in.get(), s.h_in.bytes(), compBytes,
+                                   cudaMemcpyHostToDevice, st));
+
+        void** in_ptrs = reinterpret_cast<void**>(s.h_in_ptrs.bytes());
+        size_t* in_sizes = reinterpret_cast<size_t*>(s.h_in_sizes.bytes());
+        size_t* out_sizes = reinterpret_cast<size_t*>(s.h_out_sizes.bytes());
+        uint64_t off = 0;
+        for (size_t i = 0; i < cn; i++) {
+            in_ptrs[i] = s.d_in.bytes() + off;
+            in_sizes[i] = chunkSizes[i];
+            off += chunkSizes[i];
+            out_sizes[i] = CHUNK_SIZE;
+        }
+        out_sizes[cn - 1] = uncompBytes - (cn - 1) * (uint64_t)CHUNK_SIZE;
+        CUDA_CHECK(cudaMemcpyAsync(s.d_in_ptrs.get(), in_ptrs,
+                                   sizeof(void*) * cn, cudaMemcpyHostToDevice, st));
+        CUDA_CHECK(cudaMemcpyAsync(s.d_in_sizes.get(), in_sizes,
+                                   sizeof(size_t) * cn, cudaMemcpyHostToDevice, st));
+        CUDA_CHECK(cudaMemcpyAsync(s.d_out_sizes.get(), out_sizes,
+                                   sizeof(size_t) * cn, cudaMemcpyHostToDevice, st));
+
+        if (algo == ALGO_LZ4) {
+            NVCOMP_CHECK(nvcompBatchedLZ4DecompressAsync(
+                s.d_in_ptrs.get<const void* const>(), s.d_in_sizes.get<size_t>(),
+                s.d_out_sizes.get<size_t>(), s.d_actual.get<size_t>(), cn,
+                s.d_temp.get(), tempBytes_, s.d_out_ptrs.get<void* const>(),
+                nvcompBatchedLZ4DecompressDefaultOpts,
+                s.d_statuses.get<nvcompStatus_t>(), st));
+        } else if (algo == ALGO_SNAPPY) {
+            NVCOMP_CHECK(nvcompBatchedSnappyDecompressAsync(
+                s.d_in_ptrs.get<const void* const>(), s.d_in_sizes.get<size_t>(),
+                s.d_out_sizes.get<size_t>(), s.d_actual.get<size_t>(), cn,
+                s.d_temp.get(), tempBytes_, s.d_out_ptrs.get<void* const>(),
+                nvcompBatchedSnappyDecompressDefaultOpts,
+                s.d_statuses.get<nvcompStatus_t>(), st));
+        } else {
+            NVCOMP_CHECK(nvcompBatchedZstdDecompressAsync(
+                s.d_in_ptrs.get<const void* const>(), s.d_in_sizes.get<size_t>(),
+                s.d_out_sizes.get<size_t>(), s.d_actual.get<size_t>(), cn,
+                s.d_temp.get(), tempBytes_, s.d_out_ptrs.get<void* const>(),
+                nvcompBatchedZstdDecompressDefaultOpts,
+                s.d_statuses.get<nvcompStatus_t>(), st));
+        }
+        CUDA_CHECK(cudaMemcpyAsync(s.h_statuses.bytes(), s.d_statuses.get(),
+                                   sizeof(nvcompStatus_t) * cn, cudaMemcpyDeviceToHost, st));
+        CUDA_CHECK(cudaMemcpyAsync(s.h_actual.bytes(), s.d_actual.get(),
+                                   sizeof(size_t) * cn, cudaMemcpyDeviceToHost, st));
+        CUDA_CHECK(cudaMemcpyAsync(s.h_out.bytes(), s.d_out.get(), uncompBytes,
+                                   cudaMemcpyDeviceToHost, st));
+        CUDA_CHECK(cudaEventRecord(*s.done, st));
+        s.inFlight = true;
+        s.chunkCount = cn;
+        s.uncompBytes = uncompBytes;
+    }
+
+    void retireSlot(Slot& s, std::vector<uint8_t>& out) {
+        CUDA_CHECK(cudaEventSynchronize(*s.done));
+        s.inFlight = false;
+        const nvcompStatus_t* st = reinterpret_cast<const nvcompStatus_t*>(s.h_statuses.bytes());
+        const size_t* actual = reinterpret_cast<const size_t*>(s.h_actual.bytes());
+        const size_t* expect = reinterpret_cast<const size_t*>(s.h_out_sizes.bytes());
+        for (size_t i = 0; i < s.chunkCount; i++) {
+            if (st[i] != nvcompSuccess || actual[i] != expect[i]) {
+                throw std::runtime_error("chunk decompression failed");
+            }
+        }
+        // insert-append into reserved capacity: no zero-fill of the tail.
+        out.insert(out.end(), s.h_out.bytes(), s.h_out.bytes() + s.uncompBytes);
+    }
+
+    // After a failure with work possibly still in flight, wait everything out
+    // so slot buffers are safe to reuse (or free), then clear sticky errors.
+    void quiesce() {
+        for (auto& s : slots_) {
+            if (s.stream) cudaStreamSynchronize(*s.stream);
+            s.inFlight = false;
+        }
+        cudaGetLastError();
+    }
+
+    bool ready_ = false;
+    AlgoType algo_ = ALGO_UNKNOWN;
+    size_t chunksPerSub_ = 0;
+    size_t maxCompChunk_ = 0;
+    size_t tempBytes_ = 0;
+    size_t depth_ = 0;
+    std::vector<Slot> slots_;
+};
 
 void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std::string& outputPath, ProgressCallback callback, CompressionStats* outStats) {
     using clock = std::chrono::steady_clock;
@@ -1270,7 +1225,11 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             }
             
             auto computeStart = clock::now();
-            auto archiveData = decompressBatchedFormatCPU(algo, firstVolumeData);
+            std::vector<uint8_t> archiveData;
+            BatchedDecompressPipeline gpuPipe;
+            if (!gpuPipe.decompressFile(volumeFiles[0], 0, archiveData)) {
+                archiveData = decompressBatchedFormatCPU(algo, firstVolumeData);
+            }
             auto computeEnd = clock::now();
             
             double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
@@ -1302,16 +1261,9 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             std::cout << "Multi-volume archive detected: " << manifest.volumeCount << " volume(s)\n";
         }
         
-        // Check GPU memory
-        if (!checkGPUMemoryForVolume(manifest.volumeSize)) {
-            std::cout << "Insufficient GPU memory for " << (manifest.volumeSize / (1024.0 * 1024.0 * 1024.0)) 
-                      << " GB volumes (need ~" << (manifest.volumeSize * 2.1 / (1024.0 * 1024.0 * 1024.0)) 
-                      << " GB VRAM)." << std::endl;
-            std::cout << "Falling back to CPU decompression..." << std::endl;
-            decompressCPU(algo, inputFile, outputPath, callback, outStats);
-            return;
-        }
-        
+        // No up-front whole-volume VRAM gate here anymore: the pipelined GPU
+        // decompressor sizes itself to free VRAM (shrinking depth/sub-batch)
+        // and falls back to the CPU decoder per volume when it can't fit.
         if (verbose) {
             std::cout << "Using GPU decompression (" << algoToString(static_cast<AlgoType>(manifest.algorithm)) << ")...\n";
         }
@@ -1328,44 +1280,47 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
             throw std::runtime_error("Missing volume files");
         }
         
-        // Decompress all volumes (using CPU for batched format since it's easier)
+        // Decompress all volumes through the pipelined GPU engine (buffers and
+        // streams reused across volumes); per-volume CPU fallback preserved.
         std::vector<uint8_t> fullArchive;
         fullArchive.reserve(manifest.totalUncompressedSize);
         double totalDuration = 0;
         uint64_t totalCompressedRead = firstVolumeData.size();
-        
+        BatchedDecompressPipeline gpuPipe;
+
         if (verbose) {
             std::cout << "Decompressing " << volumeFiles.size() << " volume(s)...\n";
         }
-        
+
         for (size_t i = 0; i < volumeFiles.size(); i++) {
             if (verbose && ((i + 1) % 100 == 0 || i == volumeFiles.size() - 1)) {
                 std::cout << "\r  Decompressing... " << (i + 1) << "/" << volumeFiles.size() << std::flush;
             }
-            
-            auto volReadStart = clock::now();
-            auto volumeData = readFile(volumeFiles[i]);
-            if (outStats && i > 0) {
-                outStats->readSec += std::chrono::duration<double>(clock::now() - volReadStart).count();
-                totalCompressedRead += volumeData.size();
-            }
-            
-            // Skip manifest and metadata in first volume
-            size_t dataOffset = 0;
-            if (i == 0) {
-                dataOffset = sizeof(VolumeManifest) + sizeof(VolumeMetadata) * manifest.volumeCount;
-                volumeData = std::vector<uint8_t>(volumeData.begin() + dataOffset, volumeData.end());
-            }
-            
+
+            // Manifest and metadata prefix exists only in the first volume.
+            size_t dataOffset = (i == 0)
+                ? sizeof(VolumeManifest) + sizeof(VolumeMetadata) * manifest.volumeCount
+                : 0;
+
             auto computeStart = clock::now();
-            auto decompressed = decompressBatchedFormatCPU(static_cast<AlgoType>(manifest.algorithm), volumeData);
+            // The GPU pipeline streams the volume from disk itself (reads
+            // overlap decompression), appending into fullArchive.
+            if (!gpuPipe.decompressFile(volumeFiles[i], dataOffset, fullArchive)) {
+                auto volumeData = readFile(volumeFiles[i]);
+                std::vector<uint8_t> payload(volumeData.begin() + dataOffset, volumeData.end());
+                auto decompressed = decompressBatchedFormatCPU(
+                    static_cast<AlgoType>(manifest.algorithm), payload);
+                fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
+            }
             auto computeEnd = clock::now();
-            
+            if (i > 0) {
+                std::error_code ec;
+                totalCompressedRead += fs::file_size(fs::path(volumeFiles[i]), ec);
+            }
+
             double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
             totalDuration += duration;
             if (outStats) outStats->computeSec += duration;
-            
-            fullArchive.insert(fullArchive.end(), decompressed.begin(), decompressed.end());
         }
         
         if (verbose) {
@@ -1406,18 +1361,27 @@ void decompressGPUBatched(AlgoType algo, const std::string& inputFile, const std
         std::cout << "Decompressing (" << algoToString(algo) << ")...\n";
     }
     
-    auto readStart = clock::now();
-    auto compressedData = readFile(inputFile);
     if (outStats) {
-        outStats->readSec += std::chrono::duration<double>(clock::now() - readStart).count();
-        outStats->outputBytes = compressedData.size();
+        std::error_code ec;
+        outStats->outputBytes = fs::file_size(fs::path(inputFile), ec);
     }
-    
+
     auto computeStart = clock::now();
-    
-    // Decompress (handles both batched and standard formats)
-    auto archiveData = decompressBatchedFormatCPU(algo, compressedData);
-    
+
+    // Try the pipelined GPU decompressor first (it streams the file from disk
+    // itself, overlapping reads with decompression). The CPU fallback also
+    // handles CPU-compressed (single-chunk) and standard formats.
+    std::vector<uint8_t> archiveData;
+    BatchedDecompressPipeline gpuPipe;
+    if (!gpuPipe.decompressFile(inputFile, 0, archiveData)) {
+        auto readStart = clock::now();
+        auto compressedData = readFile(inputFile);
+        if (outStats) {
+            outStats->readSec += std::chrono::duration<double>(clock::now() - readStart).count();
+        }
+        archiveData = decompressBatchedFormatCPU(algo, compressedData);
+    }
+
     auto computeEnd = clock::now();
     double duration = std::chrono::duration<double>(computeEnd - computeStart).count();
     
