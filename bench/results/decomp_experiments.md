@@ -57,3 +57,15 @@ Standard bench (512 MB med_mixed): decompress 0.77→0.63 s (lz4),
 0.65→**0.45 s** (zstd, 1.45 GB/s end-to-end incl. extraction). Small archives
 (tree_small): 0.24→**0.03 s** (slim manifest read; CPU path, no whole-file
 pre-read). No compression regressions.
+
+## Head-to-head vs zip (same isaac-sim folder, warm cache, 2026-07-08)
+
+| | nvcomp (zstd, GPU) | zip (deflate, stock Ubuntu) | delta |
+|---|---|---|---|
+| Compress | **7.7 s** (GPU compute 2.0 s; 4.5 s = writing 7 GB) | 341.3 s | **44x** |
+| Compressed size | 7.02 GB (1.99x) | 7.23 GB (1.94x) | nvcomp smaller |
+| Decompress | **2.8 s** | ~30 s (user measurement) | **~11x** |
+
+Full round trip: ~10.5 s vs ~6.2 min. Both nvcomp directions are now
+disk-I/O-bound on this NVMe. Note zip is single-threaded; a multithreaded CPU
+zstd (`zstd -T0`) would be a tougher baseline (~30-60 s compress est.).
