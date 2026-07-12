@@ -151,24 +151,51 @@ static std::vector<std::vector<uint8_t>> splitIntoVolumes(
 // ============================================================================
 
 AlgoType detectAlgorithmFromFile(const std::string& filename) {
+    // Continuation volumes (vol002+) are raw splits with no header; the
+    // NVVM manifest lives at the start of volume 001, so route any
+    // stem.volNNN.ext path to the first volume before sniffing.
+    std::string path = filename;
+    if (isVolumeFile(path)) {
+        auto volumes = detectVolumeFiles(path);
+        if (!volumes.empty()) {
+            path = volumes[0];
+        }
+    }
+
     // Use filesystem::path to properly handle Unicode paths on Windows
-    std::ifstream file(fs::path(filename), std::ios::binary);
+    std::ifstream file(fs::path(path), std::ios::binary);
     if (!file.is_open()) {
         return ALGO_UNKNOWN;
     }
-    
-    // Try to read BatchedHeader
-    BatchedHeader header;
-    file.read(reinterpret_cast<char*>(&header), sizeof(BatchedHeader));
-    
-    if (file.gcount() < sizeof(BatchedHeader)) {
+
+    uint32_t magic = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (file.gcount() < static_cast<std::streamsize>(sizeof(magic))) {
         return ALGO_UNKNOWN;
     }
-    
+    file.seekg(0);
+
+    if (magic == VOLUME_MAGIC) {
+        VolumeManifest manifest;
+        file.read(reinterpret_cast<char*>(&manifest), sizeof(VolumeManifest));
+        if (file.gcount() < static_cast<std::streamsize>(sizeof(VolumeManifest))
+            || manifest.algorithm >= ALGO_UNKNOWN) {
+            return ALGO_UNKNOWN;
+        }
+        return static_cast<AlgoType>(manifest.algorithm);
+    }
+
+    BatchedHeader header;
+    file.read(reinterpret_cast<char*>(&header), sizeof(BatchedHeader));
+
+    if (file.gcount() < static_cast<std::streamsize>(sizeof(BatchedHeader))) {
+        return ALGO_UNKNOWN;
+    }
+
     if (header.magic != BATCHED_MAGIC) {
         return ALGO_UNKNOWN;
     }
-    
+
     return static_cast<AlgoType>(header.algorithm);
 }
 
@@ -944,6 +971,58 @@ struct VectorSink : DecompressSink {
     }
     uint64_t consumed() const override { return out_.size(); }
     std::vector<uint8_t>& out_;
+};
+
+// Feeds decompressed bytes into an ArchiveMetadataScanner: entries are
+// recorded, file data is discarded, buffers release immediately. Memory stays
+// O(one sub-batch). Both a callback cancel (ListingCanceled) and metadata
+// completion (all entries seen, only trailing data left) stop the pipeline
+// through the ExtractionAbort path -- no CPU fallback; the caller tells them
+// apart via canceled()/finished().
+struct ListingSink : DecompressSink {
+    ListingSink(ArchiveMetadataScanner& scanner,
+                std::function<void(uint64_t, uint64_t)> progress,
+                uint64_t totalBytes)
+        : scanner_(scanner), progress_(std::move(progress)), total_(totalBytes) {}
+
+    void consume(const uint8_t* data, size_t n, std::function<void()> release) override {
+        try {
+            scanner_.feed(data, n);
+        } catch (const ListingCanceled&) {
+            // Release BEFORE throwing: the abort path never returns this
+            // pinned buffer to the pool otherwise.
+            if (release) release();
+            canceled_ = true;
+            throw ExtractionAbort("listing canceled");
+        } catch (const std::exception& e) {
+            // Wrap parse errors too: a plain exception here would read as a
+            // GPU failure and trigger the CPU fallback (re-decompressing into
+            // a mid-stream parser).
+            if (release) release();
+            throw ExtractionAbort(e.what());
+        }
+        consumed_ += n;
+        if (release) release();
+        if (progress_) progress_(consumed_, total_);
+        if (scanner_.metadataComplete() && !scanner_.done()) {
+            // All entries emitted; only the last file's data remains. Stop
+            // decompressing early -- possibly skipping whole volumes.
+            finished_ = true;
+            throw ExtractionAbort("listing complete");
+        }
+    }
+    uint64_t consumed() const override { return consumed_; }
+
+    bool canceled() const { return canceled_; }
+    bool finished() const { return finished_; }
+
+private:
+    ArchiveMetadataScanner& scanner_;
+    std::function<void(uint64_t, uint64_t)> progress_;
+    uint64_t total_;
+    uint64_t consumed_ = 0;
+    bool canceled_ = false;
+    bool finished_ = false;
 };
 
 // Feeds decompressed bytes to an ArchiveExtractor on a dedicated thread, so
@@ -2293,58 +2372,218 @@ void decompressGPUManager(const std::string& inputFile, const std::string& outpu
 }
 
 // ============================================================================
-// List Compressed Archive
+// Archive Metadata Listing (no extraction)
+// ============================================================================
+
+// Uncompressed NVAR file: stream small reads into the scanner and seekg past
+// file data. I/O is O(metadata), not O(archive).
+static void listUncompressedArchiveFile(const std::string& path,
+                                        ArchiveMetadataScanner& scanner,
+                                        const std::function<void(uint64_t, uint64_t)>& progress) {
+    std::ifstream f(fs::path(path), std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Cannot open archive file: " + path);
+    }
+    std::error_code ec;
+    const uint64_t fileSize = fs::file_size(fs::path(path), ec);
+
+    std::vector<uint8_t> buf(1 << 20);
+    uint64_t pos = 0;
+    while (!scanner.done()) {
+        uint64_t skip = scanner.skippableBytes();
+        if (skip > 0) {
+            f.seekg(static_cast<std::streamoff>(skip), std::ios::cur);
+            if (!f) {
+                throw std::runtime_error("Invalid archive: truncated file data");
+            }
+            scanner.skip(skip);
+            pos += skip;
+            continue;
+        }
+        f.read(reinterpret_cast<char*>(buf.data()),
+               static_cast<std::streamsize>(buf.size()));
+        std::streamsize got = f.gcount();
+        if (got <= 0) {
+            if (!scanner.done()) {
+                throw std::runtime_error("Invalid archive: truncated");
+            }
+            break;
+        }
+        scanner.feed(buf.data(), static_cast<size_t>(got));
+        pos += static_cast<uint64_t>(got);
+        if (progress) progress(std::min(pos, fileSize), fileSize);
+    }
+}
+
+void listArchiveEntries(const std::string& inputFile,
+                        const std::function<bool(const ArchiveEntry&)>& onEntry,
+                        const std::function<void(uint64_t, uint64_t)>& progress) {
+    ArchiveMetadataScanner scanner(onEntry);
+
+    // Route any volNNN path to the first volume (manifest + stream head).
+    auto volumeFiles = detectVolumeFiles(inputFile);
+    if (volumeFiles.empty()) {
+        throw std::runtime_error("Cannot open archive file: " + inputFile);
+    }
+    const std::string& first = volumeFiles[0];
+
+    uint32_t magic = 0;
+    {
+        std::ifstream probe(fs::path(first), std::ios::binary);
+        if (!probe.is_open()) {
+            throw std::runtime_error("Cannot open archive file: " + first);
+        }
+        probe.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        if (probe.gcount() < static_cast<std::streamsize>(sizeof(magic))) {
+            throw std::runtime_error("Invalid archive: too small");
+        }
+    }
+
+    if (magic == ARCHIVE_MAGIC) {
+        listUncompressedArchiveFile(first, scanner, progress);
+        return;
+    }
+
+    // Compressed: NVVM multi-volume or single NVBC file.
+    AlgoType algo;
+    uint64_t total = 0;
+    uint64_t dataOffset0 = 0;
+
+    if (magic == VOLUME_MAGIC) {
+        VolumeManifest manifest;
+        std::ifstream mf(fs::path(first), std::ios::binary);
+        if (!mf.read(reinterpret_cast<char*>(&manifest), sizeof(VolumeManifest))) {
+            throw std::runtime_error("Invalid volume file: failed reading manifest");
+        }
+        if (volumeFiles.size() != manifest.volumeCount) {
+            throw std::runtime_error("Missing volume files: expected "
+                + std::to_string(manifest.volumeCount) + ", found "
+                + std::to_string(volumeFiles.size()));
+        }
+        if (manifest.algorithm >= ALGO_UNKNOWN) {
+            throw std::runtime_error("Invalid volume manifest: bad algorithm");
+        }
+        algo = static_cast<AlgoType>(manifest.algorithm);
+        total = manifest.totalUncompressedSize;
+        dataOffset0 = sizeof(VolumeManifest)
+            + sizeof(VolumeMetadata) * static_cast<uint64_t>(manifest.volumeCount);
+    } else if (magic == BATCHED_MAGIC) {
+        BatchedHeader header;
+        std::ifstream hf(fs::path(first), std::ios::binary);
+        if (!hf.read(reinterpret_cast<char*>(&header), sizeof(BatchedHeader))) {
+            throw std::runtime_error("Invalid archive: failed reading header");
+        }
+        if (header.algorithm >= ALGO_UNKNOWN) {
+            throw std::runtime_error("Invalid archive header: bad algorithm");
+        }
+        algo = static_cast<AlgoType>(header.algorithm);
+        total = header.uncompressedSize;
+        volumeFiles.resize(1);
+    } else {
+        throw std::runtime_error(
+            "Unrecognized archive format (not an nvCOMP archive)");
+    }
+
+    ListingSink sink(scanner, progress, total);
+    BatchedDecompressPipeline gpuPipe;
+    try {
+        for (size_t i = 0; i < volumeFiles.size(); i++) {
+            uint64_t off = (i == 0) ? dataOffset0 : 0;
+            uint64_t volConsumedBefore = sink.consumed();
+            if (!gpuPipe.decompressFile(volumeFiles[i], off, sink)) {
+                // CPU fallback, resuming past bytes the GPU already delivered
+                // (whole volume in RAM -- same profile as extraction's
+                // fallback).
+                uint64_t partial = sink.consumed() - volConsumedBefore;
+                auto volumeData = readFile(fs::path(volumeFiles[i]));
+                if (volumeData.size() < off) {
+                    throw std::runtime_error("Invalid volume file: too small");
+                }
+                std::vector<uint8_t> payload(volumeData.begin() + off, volumeData.end());
+                auto decompressed = decompressBatchedFormatCPU(algo, payload);
+                if (partial > decompressed.size()) {
+                    throw std::runtime_error("Listing resume mismatch");
+                }
+                sink.consume(decompressed.data() + partial,
+                             decompressed.size() - partial, nullptr);
+            }
+            if (scanner.metadataComplete()) break;
+        }
+    } catch (const ExtractionAbort& e) {
+        if (sink.canceled()) throw ListingCanceled();
+        if (!sink.finished()) {
+            // Scanner parse failure surfaced through the abort path.
+            throw std::runtime_error(e.what());
+        }
+        // finished(): early completion once all metadata was seen.
+    }
+
+    if (!scanner.metadataComplete()) {
+        throw std::runtime_error("Invalid archive: listing ended before all entries");
+    }
+}
+
+// ============================================================================
+// List Compressed Archive (CLI -l)
 // ============================================================================
 
 void listCompressedArchive(AlgoType algo, const std::string& inputFile, bool useCPU, bool cudaAvailable) {
-    // Detect volume files
+    (void)algo; (void)useCPU; (void)cudaAvailable;  // auto-detected / unused
+
+    // Multi-volume preamble: manifest + per-volume breakdown (prefix read
+    // only -- volumes can be multi-GB).
     auto volumeFiles = detectVolumeFiles(inputFile);
-    
-    // Check if multi-volume
-    if (volumeFiles.size() > 1 || isVolumeFile(volumeFiles[0])) {
-        std::cout << "Multi-volume archive detected: " << volumeFiles.size() << " volume(s)" << std::endl;
-        
-        // Read manifest from first volume
-        auto firstVolumeData = readFile(volumeFiles[0]);
-        
-        if (firstVolumeData.size() < sizeof(VolumeManifest)) {
-            throw std::runtime_error("Invalid volume file");
+    if (volumeFiles.size() > 1 || (volumeFiles.size() == 1 && isVolumeFile(volumeFiles[0]))) {
+        std::ifstream mf(fs::path(volumeFiles[0]), std::ios::binary);
+        VolumeManifest manifest{};
+        if (mf.read(reinterpret_cast<char*>(&manifest), sizeof(VolumeManifest))
+            && manifest.magic == VOLUME_MAGIC) {
+            std::cout << "Multi-volume archive: " << volumeFiles.size() << " volume(s)\n";
+            std::cout << "Algorithm: " << algoToString(static_cast<AlgoType>(manifest.algorithm)) << "\n";
+            std::cout << "Volume size: " << (manifest.volumeSize / (1024.0 * 1024.0 * 1024.0)) << " GB\n";
+            std::cout << "Total uncompressed: " << (manifest.totalUncompressedSize / (1024.0 * 1024.0)) << " MB\n";
+            std::vector<VolumeMetadata> volumeMetadata(manifest.volumeCount);
+            if (mf.read(reinterpret_cast<char*>(volumeMetadata.data()),
+                        sizeof(VolumeMetadata) * manifest.volumeCount)) {
+                std::cout << "\nVolume breakdown:\n";
+                for (const auto& meta : volumeMetadata) {
+                    std::cout << "  Volume " << meta.volumeIndex << ": "
+                              << (meta.compressedSize / (1024.0 * 1024.0)) << " MB compressed, "
+                              << (meta.uncompressedSize / (1024.0 * 1024.0)) << " MB uncompressed\n";
+                }
+            }
+            std::cout << "\n";
         }
-        
-        VolumeManifest manifest;
-        std::memcpy(&manifest, firstVolumeData.data(), sizeof(VolumeManifest));
-        
-        if (manifest.magic != VOLUME_MAGIC) {
-            throw std::runtime_error("Invalid volume manifest");
-        }
-        
-        std::cout << "Algorithm: " << algoToString(static_cast<AlgoType>(manifest.algorithm)) << std::endl;
-        std::cout << "Volume size: " << (manifest.volumeSize / (1024.0 * 1024.0 * 1024.0)) << " GB" << std::endl;
-        std::cout << "Total uncompressed: " << (manifest.totalUncompressedSize / (1024.0 * 1024.0)) << " MB" << std::endl;
-        
-        // Read volume metadata
-        size_t metadataOffset = sizeof(VolumeManifest);
-        std::vector<VolumeMetadata> volumeMetadata(manifest.volumeCount);
-        std::memcpy(volumeMetadata.data(), firstVolumeData.data() + metadataOffset, 
-                   sizeof(VolumeMetadata) * manifest.volumeCount);
-        
-        std::cout << "\nVolume breakdown:" << std::endl;
-        for (const auto& meta : volumeMetadata) {
-            std::cout << "  Volume " << meta.volumeIndex << ": " 
-                      << (meta.compressedSize / (1024.0 * 1024.0)) << " MB compressed, "
-                      << (meta.uncompressedSize / (1024.0 * 1024.0)) << " MB uncompressed" << std::endl;
-        }
-        
-        std::cout << "\nListing archive contents requires decompression..." << std::endl;
-        return;
     }
-    
-    // Single file
-    auto inputData = readFile(inputFile);
-    
-    // Try to decompress and list
-    std::cout << "Listing contents of single file archive..." << std::endl;
-    std::cout << "Full listing requires decompression implementation" << std::endl;
+
+    // Entry table, same format as listArchive() for uncompressed archives.
+    auto formatSize = [](uint64_t bytes, double& value, std::string& unit) {
+        value = static_cast<double>(bytes);
+        unit = "B";
+        if (value >= 1024.0 * 1024.0 * 1024.0) { value /= 1024.0 * 1024.0 * 1024.0; unit = "GB"; }
+        else if (value >= 1024.0 * 1024.0)     { value /= 1024.0 * 1024.0; unit = "MB"; }
+        else if (value >= 1024.0)              { value /= 1024.0; unit = "KB"; }
+    };
+
+    std::cout << std::string(60, '-') << "\n";
+    uint64_t totalSize = 0;
+    uint64_t fileCount = 0;
+    listArchiveEntries(inputFile, [&](const ArchiveEntry& e) {
+        double v; std::string u;
+        formatSize(e.fileSize, v, u);
+        std::cout << "  " << std::left << std::setw(50) << e.relativePath
+                  << std::right << std::setw(8) << std::fixed << std::setprecision(2)
+                  << v << " " << u << "\n";
+        totalSize += e.fileSize;
+        fileCount++;
+        return true;
+    });
+    std::cout << std::string(60, '-') << "\n";
+
+    double v; std::string u;
+    formatSize(totalSize, v, u);
+    std::cout << "Total: " << fileCount << " file(s), "
+              << std::fixed << std::setprecision(2) << v << " " << u << std::endl;
 }
 
 } // namespace nvcomp_core

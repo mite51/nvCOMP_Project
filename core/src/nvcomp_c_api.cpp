@@ -668,6 +668,44 @@ nvcomp_algorithm_t nvcomp_detect_algorithm_from_file(const char* filename) {
 // Archive Listing
 // ============================================================================
 
+nvcomp_error_t nvcomp_list_archive_entries(
+    const char* input_file,
+    nvcomp_entry_callback_t entry_callback,
+    nvcomp_progress_callback_t progress_callback,
+    void* user_data
+) {
+    if (!input_file || !entry_callback) {
+        g_last_error = "Null input file or entry callback provided";
+        return NVCOMP_ERROR_INVALID_ARGUMENT;
+    }
+
+    try {
+        g_last_error.clear();
+        std::function<void(uint64_t, uint64_t)> progress;
+        if (progress_callback) {
+            progress = [progress_callback, user_data](uint64_t cur, uint64_t total) {
+                progress_callback(cur, total, user_data);
+            };
+        }
+        nvcomp_core::listArchiveEntries(
+            input_file,
+            [entry_callback, user_data](const nvcomp_core::ArchiveEntry& e) {
+                return entry_callback(e.relativePath.c_str(), e.fileSize,
+                                      e.mode, e.mtimeNs, user_data) == 0;
+            },
+            progress);
+        return NVCOMP_SUCCESS;
+    } catch (const nvcomp_core::ListingCanceled&) {
+        // Must precede the generic handlers: ListingCanceled derives from
+        // std::runtime_error and executeSafely would misclassify it.
+        g_last_error = "Listing canceled by caller";
+        return NVCOMP_ERROR_CANCELED;
+    } catch (...) {
+        // Reuse executeSafely's exception -> error-code mapping.
+        return executeSafely([] { std::rethrow_exception(std::current_exception()); });
+    }
+}
+
 nvcomp_error_t nvcomp_list_compressed_archive(
     nvcomp_algorithm_t algo,
     const char* input_file,

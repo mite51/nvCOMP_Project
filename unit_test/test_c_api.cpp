@@ -19,7 +19,9 @@
 #include <cstring>
 #include <string>
 #include <atomic>
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <vector>
 
 // Test utilities
@@ -317,15 +319,99 @@ void test_folder_compression() {
     TEST_PASS();
 }
 
+namespace {
+
+struct ListedEntry {
+    std::string path;
+    uint64_t size;
+    uint32_t mode;
+    uint64_t mtimeNs;
+};
+
+struct ListCollector {
+    std::vector<ListedEntry> entries;
+    int progressCalls = 0;
+    uint64_t lastCur = 0;
+    uint64_t lastTotal = 0;
+    int cancelAfter = -1;   // >=0: return nonzero once this many collected
+};
+
+int collectEntry(const char* path, uint64_t size, uint32_t mode,
+                 uint64_t mtime_ns, void* user_data) {
+    auto* c = static_cast<ListCollector*>(user_data);
+    if (c->cancelAfter >= 0 &&
+        static_cast<int>(c->entries.size()) >= c->cancelAfter) {
+        return 1;
+    }
+    c->entries.push_back({path, size, mode, mtime_ns});
+    return 0;
+}
+
+void collectProgress(uint64_t current, uint64_t total, void* user_data) {
+    auto* c = static_cast<ListCollector*>(user_data);
+    c->progressCalls++;
+    c->lastCur = current;
+    c->lastTotal = total;
+}
+
+} // namespace
+
 void test_archive_listing() {
-    TEST_START("Archive Listing");
-    
-    // Note: Skipping this test due to known volume detection bug in core library
-    // The listCompressedArchive function has a bug that causes excessive output
-    // This is a core library issue, not a C API wrapper issue
-    std::cout << "  Skipping archive listing test (known volume detection bug in core library)" << std::endl;
-    std::cout << "  C API binding exists and compiles correctly" << std::endl;
-    
+    TEST_START("Archive Listing (nvcomp_list_archive_entries)");
+
+    const char* archive = "output/test_c_api/list_entries.lz4";
+    nvcomp_error_t result = nvcomp_compress_cpu(
+        nullptr, NVCOMP_ALGO_LZ4, "sample_folder", archive,
+        2684354560ULL, nullptr);
+    ASSERT_EQ(result, NVCOMP_SUCCESS, "Should compress sample_folder");
+
+    // Expected contents: every regular file under sample_folder
+    std::map<std::string, uint64_t> expected;
+    for (const auto& de : std::filesystem::recursive_directory_iterator("sample_folder")) {
+        if (de.is_regular_file()) {
+            std::string rel = std::filesystem::relative(de.path(), "sample_folder").generic_string();
+            expected[rel] = de.file_size();
+        }
+    }
+    ASSERT_TRUE(!expected.empty(), "sample_folder should contain files");
+
+    ListCollector c;
+    result = nvcomp_list_archive_entries(archive, collectEntry, collectProgress, &c);
+    ASSERT_EQ(result, NVCOMP_SUCCESS, "Listing should succeed");
+    ASSERT_EQ(c.entries.size(), expected.size(), "Entry count should match folder contents");
+
+    for (const auto& e : c.entries) {
+        auto it = expected.find(e.path);
+        ASSERT_TRUE(it != expected.end(), ("Unexpected entry: " + e.path).c_str());
+        ASSERT_EQ(e.size, it->second, ("Size mismatch for " + e.path).c_str());
+        ASSERT_TRUE(e.mode != 0, "v2 archives should carry POSIX modes");
+        ASSERT_TRUE(e.mtimeNs != 0, "v2 archives should carry mtimes");
+    }
+
+    ASSERT_TRUE(c.progressCalls > 0, "Progress callback should fire");
+    ASSERT_TRUE(c.lastCur <= c.lastTotal, "Progress current should not exceed total");
+
+    // Cancellation: stop after the first entry
+    ListCollector cancel;
+    cancel.cancelAfter = 1;
+    result = nvcomp_list_archive_entries(archive, collectEntry, nullptr, &cancel);
+    ASSERT_EQ(result, NVCOMP_ERROR_CANCELED, "Cancel should map to NVCOMP_ERROR_CANCELED");
+    ASSERT_EQ(cancel.entries.size(), size_t(1), "Exactly one entry before cancel");
+    ASSERT_TRUE(strlen(nvcomp_get_last_error()) > 0, "Cancel should set last error");
+
+    // Invalid arguments
+    result = nvcomp_list_archive_entries(nullptr, collectEntry, nullptr, nullptr);
+    ASSERT_EQ(result, NVCOMP_ERROR_INVALID_ARGUMENT, "Should reject null input file");
+    result = nvcomp_list_archive_entries(archive, nullptr, nullptr, nullptr);
+    ASSERT_EQ(result, NVCOMP_ERROR_INVALID_ARGUMENT, "Should reject null entry callback");
+
+    // Missing file
+    ListCollector missing;
+    result = nvcomp_list_archive_entries("output/test_c_api/does_not_exist.lz4",
+                                         collectEntry, nullptr, &missing);
+    ASSERT_TRUE(result != NVCOMP_SUCCESS, "Missing file should fail");
+    ASSERT_TRUE(strlen(nvcomp_get_last_error()) > 0, "Missing file should set last error");
+
     TEST_PASS();
 }
 

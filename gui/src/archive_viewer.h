@@ -15,9 +15,11 @@
 #include <QTreeWidgetItem>
 #include <QMap>
 #include <QThread>
+#include <atomic>
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class ArchiveViewerDialog; }
+class QTimer;
 QT_END_NAMESPACE
 
 /**
@@ -32,6 +34,8 @@ struct ArchiveFileInfo {
     double compressionRatio;       ///< Ratio (compressed/uncompressed * 100)
     bool isDirectory;              ///< True if this is a directory entry
     QTreeWidgetItem* treeItem;     ///< Associated tree widget item
+    uint32_t mode = 0;             ///< POSIX permission bits (0 = unknown)
+    uint64_t mtimeNs = 0;          ///< mtime, ns since epoch (0 = unknown)
 };
 
 /**
@@ -46,6 +50,16 @@ public:
     explicit ArchiveLoaderWorker(const QString& archivePath, QObject* parent = nullptr);
     ~ArchiveLoaderWorker();
 
+    /**
+     * @brief Requests cooperative cancellation of the load (thread-safe)
+     */
+    void cancel() { m_canceled.store(true); }
+
+    /**
+     * @brief Whether cancellation has been requested (thread-safe)
+     */
+    bool isCanceled() const { return m_canceled.load(); }
+
 signals:
     void loadingProgress(int percentage, const QString& status);
     void loadingComplete(const QList<ArchiveFileInfo>& files, 
@@ -59,20 +73,22 @@ protected:
 
 private:
     QString m_archivePath;
-    bool m_canceled;
-    
+    std::atomic<bool> m_canceled;
+
     /**
-     * @brief Loads a compressed archive by decompressing it first
-     * @param archivePath Path to the compressed archive
+     * @brief Lists a compressed archive's entries via the streaming metadata
+     *        API -- nothing is extracted to disk
+     * @param archivePath Path to the compressed archive (vol001 for volumes)
      * @param files Output list of files
      * @param totalSize Output total uncompressed size
-     * @param totalCompressed Output total compressed size
+     * @param totalCompressed Total compressed size (all volumes; used for
+     *        per-file ratio estimates)
      * @return true on success, false on error (emits loadingError)
      */
-    bool loadCompressedArchive(const QString& archivePath, 
+    bool loadCompressedArchive(const QString& archivePath,
                               QList<ArchiveFileInfo>& files,
                               uint64_t& totalSize,
-                              uint64_t& totalCompressed);
+                              uint64_t totalCompressed);
 };
 
 /**
@@ -188,6 +204,7 @@ private:
     uint64_t m_totalCompressed;   ///< Total compressed size
     int m_volumeCount;            ///< Number of volumes in archive
     ArchiveLoaderWorker* m_loader;  ///< Background loader thread
+    QTimer* m_searchDebounce;     ///< Debounce timer for search filtering
     
     /**
      * @brief Initializes the UI components
@@ -212,9 +229,13 @@ private:
     /**
      * @brief Creates or retrieves a folder item in the tree
      * @param folderPath Path to the folder
+     * @param rootItem Root item folders hang off (may still be detached)
+     * @param dirIcon Cached folder icon
      * @return Tree widget item for the folder
      */
-    QTreeWidgetItem* getOrCreateFolderItem(const QString& folderPath);
+    QTreeWidgetItem* getOrCreateFolderItem(const QString& folderPath,
+                                           QTreeWidgetItem* rootItem,
+                                           const QIcon& dirIcon);
     
     /**
      * @brief Updates the statistics display

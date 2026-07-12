@@ -43,7 +43,8 @@ typedef enum {
     NVCOMP_ERROR_OUT_OF_MEMORY,
     NVCOMP_ERROR_CUDA_ERROR,
     NVCOMP_ERROR_UNSUPPORTED_ALGORITHM,
-    NVCOMP_ERROR_UNKNOWN
+    NVCOMP_ERROR_UNKNOWN,
+    NVCOMP_ERROR_CANCELED
 } nvcomp_error_t;
 
 // ============================================================================
@@ -494,6 +495,43 @@ NVCOMP_C_API nvcomp_algorithm_t nvcomp_detect_algorithm_from_file(const char* fi
 // ============================================================================
 // Archive Listing
 // ============================================================================
+
+/**
+ * @brief Per-entry callback for nvcomp_list_archive_entries
+ * @param path Entry path inside the archive (UTF-8, valid only during the call)
+ * @param size Uncompressed file size in bytes
+ * @param mode POSIX permission bits (0 = unknown, e.g. v1 archives)
+ * @param mtime_ns Modification time, ns since the Unix epoch (0 = unknown)
+ * @param user_data User-provided context data
+ * @return 0 to continue, nonzero to cancel the listing
+ */
+typedef int (*nvcomp_entry_callback_t)(const char* path, uint64_t size,
+                                       uint32_t mode, uint64_t mtime_ns,
+                                       void* user_data);
+
+/**
+ * @brief Enumerate archive entries without extracting anything to disk.
+ *
+ * Handles uncompressed (NVAR), compressed single-file (NVBC), and
+ * multi-volume (NVVM) archives; any volume path selects the whole set. The
+ * algorithm is auto-detected. Compressed archives stream through the GPU
+ * decompressor (CPU fallback) with sub-batch memory use; no temp files are
+ * written.
+ *
+ * @param input_file Archive path
+ * @param entry_callback Called once per entry, in archive order (required)
+ * @param progress_callback Optional; receives (processed, total) uncompressed
+ *                          byte counts
+ * @param user_data Passed to both callbacks
+ * @return NVCOMP_SUCCESS, NVCOMP_ERROR_CANCELED if the entry callback
+ *         returned nonzero, or an error code (see nvcomp_get_last_error)
+ */
+NVCOMP_C_API nvcomp_error_t nvcomp_list_archive_entries(
+    const char* input_file,
+    nvcomp_entry_callback_t entry_callback,
+    nvcomp_progress_callback_t progress_callback,
+    void* user_data
+);
 
 /**
  * @brief List contents of compressed archive

@@ -409,7 +409,10 @@ QString DesktopIntegration::generateDesktopFileContent() const
     content += "Name=nvCOMP\n";
     content += "GenericName=GPU-Accelerated Compression\n";
     content += "Comment=Compress and decompress files using NVIDIA GPU acceleration\n";
-    content += QString("Exec=%1 --add-file %%f\n").arg(m_executablePath);
+    // Single '%' in the output: QString::arg() leaves non-digit %-codes
+    // untouched, and the desktop spec treats "%%" as a literal percent —
+    // writing "%%f" here would pass the literal string "%f" to the app.
+    content += QString("Exec=%1 --add-file %f\n").arg(m_executablePath);
     content += "Icon=nvcomp\n";
     content += "Terminal=false\n";
     content += "Categories=Utility;Archiving;Compression;Qt;\n";
@@ -423,17 +426,19 @@ QString DesktopIntegration::generateDesktopFileContent() const
     // Desktop Actions
     content += "[Desktop Action Compress]\n";
     content += "Name=Compress with nvCOMP\n";
-    content += QString("Exec=%1 --compress --add-file %%F\n").arg(m_executablePath);
+    content += QString("Exec=%1 --compress --add-file %F\n").arg(m_executablePath);
     content += "\n";
-    
+
     content += "[Desktop Action ExtractHere]\n";
     content += "Name=Extract Here\n";
-    content += QString("Exec=%1 --decompress --output-dir %%d --add-file %%f\n").arg(m_executablePath);
+    // --extract-here derives the output directory from the archive path
+    // (the %d field code is deprecated and ignored by modern launchers).
+    content += QString("Exec=%1 --extract-here --add-file %f\n").arg(m_executablePath);
     content += "\n";
-    
+
     content += "[Desktop Action ExtractTo]\n";
     content += "Name=Extract to Folder...\n";
-    content += QString("Exec=%1 --decompress --add-file %%f\n").arg(m_executablePath);
+    content += QString("Exec=%1 --decompress --add-file %f\n").arg(m_executablePath);
     content += "\n";
     
     return content;

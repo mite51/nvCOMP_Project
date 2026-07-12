@@ -6,6 +6,7 @@
 #include <functional>
 #include <filesystem>
 #include <memory>
+#include <stdexcept>
 
 // Windows DLL export/import macros
 #ifdef _WIN32
@@ -271,6 +272,77 @@ NVCOMP_CORE_API std::vector<ArchiveEntry> collectArchiveEntries(const std::strin
  * with the folder itself as the base.
  */
 NVCOMP_CORE_API std::vector<ArchiveEntry> collectArchiveEntriesFromList(const std::vector<std::string>& filePaths);
+
+// ============================================================================
+// Archive Metadata Listing (no extraction)
+// ============================================================================
+
+/** Thrown when a listing entry callback requests cancellation. */
+struct NVCOMP_CORE_API ListingCanceled : public std::runtime_error {
+    ListingCanceled() : std::runtime_error("Listing canceled by caller") {}
+};
+
+/**
+ * Incremental NVAR metadata scanner: parses the same wire format as
+ * ArchiveExtractor but records per-file metadata and discards file data
+ * instead of writing it. feed() accepts the decompressed archive stream in
+ * arbitrary pieces; onEntry fires once per file as soon as its
+ * path/size/mode/mtime are known -- before its data bytes arrive. Returning
+ * false from onEntry throws ListingCanceled out of feed().
+ *
+ * metadataComplete() turns true once every entry has been emitted (the last
+ * file's data may still be pending) -- callers streaming volume-by-volume can
+ * stop decompressing there. For seekable uncompressed archives,
+ * skippableBytes() reports how much of the current file's data remains, and
+ * skip() advances the parser past bytes the caller seeked over.
+ *
+ * The parse states intentionally mirror ArchiveExtractor::Impl; the wire
+ * format is frozen (v1/v2 entry sizes are static_asserted above), and the
+ * extractor's state machine is too interleaved with its write-dispatch
+ * machinery to share safely.
+ */
+class NVCOMP_CORE_API ArchiveMetadataScanner {
+public:
+    using EntryFn = std::function<bool(const ArchiveEntry&)>;
+    explicit ArchiveMetadataScanner(EntryFn onEntry);
+
+    void feed(const uint8_t* data, size_t n);
+    uint64_t skippableBytes() const;
+    void skip(uint64_t n);
+    bool done() const;              // stream fully parsed (incl. last data byte)
+    bool metadataComplete() const;  // every entry emitted; data may remain
+    uint32_t fileCount() const;     // valid once the header has been parsed
+
+private:
+    enum class State { Header, Entry, Path, Data, Done };
+
+    const uint8_t* fill(size_t need, const uint8_t*& p, size_t& n);
+    void fileDone();
+
+    EntryFn onEntry_;
+    State state_ = State::Header;
+    std::vector<uint8_t> carry_;
+    ArchiveHeader header_{};
+    FileEntry entry_{};
+    uint64_t dataRemaining_ = 0;
+    uint32_t filesDone_ = 0;
+    uint32_t entriesEmitted_ = 0;
+};
+
+/**
+ * Enumerate the entries of an archive file without extracting anything.
+ * Handles uncompressed NVAR (seek-skips file data, O(metadata) I/O),
+ * single-file NVBC, and multi-volume NVVM archives (any volNNN path);
+ * compressed archives stream through the GPU pipeline with CPU fallback,
+ * O(sub-batch) memory, and stop decompressing as soon as the last entry's
+ * metadata is known. onEntry returning false cancels (throws
+ * ListingCanceled). progress, when set, receives (processedBytes,
+ * totalUncompressedBytes).
+ */
+NVCOMP_CORE_API void listArchiveEntries(
+    const std::string& inputFile,
+    const std::function<bool(const ArchiveEntry&)>& onEntry,
+    const std::function<void(uint64_t, uint64_t)>& progress = nullptr);
 
 // ============================================================================
 // GPU Compression (Batched API)

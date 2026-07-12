@@ -9,13 +9,13 @@
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QDir>
-#include <QDirIterator>
 #include <QDateTime>
 #include <QMenu>
 #include <QHeaderView>
 #include <QProgressDialog>
 #include <QApplication>
 #include <QRegularExpression>
+#include <QTimer>
 #include <fstream>
 #include <cstring>
 
@@ -23,6 +23,62 @@
 extern "C" {
 #include "nvcomp_c_api.h"
 }
+
+// ============================================================================
+// Listing callbacks (nvcomp_list_archive_entries)
+// ============================================================================
+
+namespace {
+
+struct ListContext {
+    ArchiveLoaderWorker* worker;
+    QList<ArchiveFileInfo>* files;
+    uint64_t totalSize = 0;
+};
+
+// Called once per archive entry, on the worker thread. Signals emitted here
+// cross to the GUI thread via queued connections.
+int viewerEntryCallback(const char* path, uint64_t size, uint32_t mode,
+                        uint64_t mtimeNs, void* userData)
+{
+    auto* ctx = static_cast<ListContext*>(userData);
+    if (ctx->worker->isCanceled()) {
+        return 1;  // cancel the listing
+    }
+
+    ArchiveFileInfo info;
+    info.path = QString::fromUtf8(path);
+    info.path.replace(QLatin1Char('\\'), QLatin1Char('/'));  // Windows-built archives
+    int slash = info.path.lastIndexOf(QLatin1Char('/'));
+    info.name = slash >= 0 ? info.path.mid(slash + 1) : info.path;
+    info.size = size;
+    info.compressedSize = 0;
+    info.compressionRatio = 0.0;
+    info.isDirectory = info.path.endsWith(QLatin1Char('/'));
+    info.treeItem = nullptr;
+    info.mode = mode;
+    info.mtimeNs = mtimeNs;
+
+    ctx->files->append(info);
+    ctx->totalSize += size;
+    return 0;
+}
+
+// Byte-level progress (one call per decompressed sub-batch): map onto the
+// 45-90% band of the dialog's progress scale.
+void viewerProgressCallback(uint64_t current, uint64_t total, void* userData)
+{
+    auto* ctx = static_cast<ListContext*>(userData);
+    int pct = 45;
+    if (total > 0) {
+        pct += static_cast<int>((static_cast<double>(current) / total) * 45.0);
+    }
+    emit ctx->worker->loadingProgress(qMin(pct, 90),
+        QString("Reading archive contents... %1 files found")
+            .arg(ctx->files->count()));
+}
+
+} // namespace
 
 // ============================================================================
 // ArchiveLoaderWorker Implementation
@@ -54,6 +110,7 @@ void ArchiveLoaderWorker::run()
         // Check if this is a volume archive
         QFileInfo fileInfo(m_archivePath);
         QString basePath = m_archivePath;
+        uint64_t compressedBytesOnDisk = 0;
 
         // Volume naming convention: stem.vol001.ext (see core volume.cpp).
         QRegularExpression volumeRegex("\\.vol(\\d{3})\\.");
@@ -65,15 +122,19 @@ void ArchiveLoaderWorker::run()
                 basePath = path;
             }
 
-            // Count sibling volumes for the header display.
+            // Count sibling volumes (header display) and sum their on-disk
+            // sizes (compressed-total statistic covers every volume, not
+            // just the one that was opened).
             volumeCount = 0;
             for (int i = 1; i < 1000; ++i) {
                 QString volumePath = m_archivePath;
                 volumePath.replace(volumeRegex,
                                    QString(".vol%1.").arg(i, 3, 10, QChar('0')));
-                if (!QFile::exists(volumePath)) {
+                QFileInfo volumeInfo(volumePath);
+                if (!volumeInfo.exists()) {
                     break;
                 }
+                compressedBytesOnDisk += volumeInfo.size();
                 volumeCount++;
             }
             if (volumeCount == 0) volumeCount = 1;
@@ -98,15 +159,20 @@ void ArchiveLoaderWorker::run()
         const uint32_t VOLUME_MAGIC = 0x4E56564D;  // "NVVM" - multi-volume manifest
 
         if (magic == BATCHED_MAGIC || magic == VOLUME_MAGIC) {
-            // Compressed (or multi-volume) archive - the decompress engines
-            // reassemble volumes automatically when given the vol001 path.
+            // Compressed (or multi-volume) archive: stream-list the entries
+            // via the metadata API -- nothing is extracted to disk.
             file.close();
-            emit loadingProgress(40, "Decompressing archive to read contents...");
+            emit loadingProgress(40, "Reading archive contents...");
 
-            if (!loadCompressedArchive(basePath, files, totalSize, totalCompressed)) {
+            if (compressedBytesOnDisk == 0) {
+                compressedBytesOnDisk = QFileInfo(basePath).size();
+            }
+            if (!loadCompressedArchive(basePath, files, totalSize,
+                                       compressedBytesOnDisk)) {
                 // Error already emitted by loadCompressedArchive
                 return;
             }
+            totalCompressed = compressedBytesOnDisk;
 
             // Success - continue to display
             emit loadingProgress(100, "Loading complete");
@@ -241,122 +307,55 @@ void ArchiveLoaderWorker::run()
 bool ArchiveLoaderWorker::loadCompressedArchive(const QString& archivePath,
                                                QList<ArchiveFileInfo>& files,
                                                uint64_t& totalSize,
-                                               uint64_t& totalCompressed)
+                                               uint64_t totalCompressed)
 {
     try {
-        // Get file size for compressed size estimate
-        QFileInfo fileInfo(archivePath);
-        uint64_t compressedFileSize = fileInfo.size();
-        
-        emit loadingProgress(45, "Creating temporary extraction directory...");
-        
-        // Create temporary directory for extraction
-        QString tempDir = QDir::temp().filePath("nvcomp_archive_viewer_" + 
-            QString::number(QDateTime::currentMSecsSinceEpoch()));
-        QDir().mkpath(tempDir);
-        
-        emit loadingProgress(50, "Decompressing archive...");
-        
-        // Use nvCOMP C API to decompress
-        nvcomp_operation_handle handle = nvcomp_create_operation_handle();
-        if (!handle) {
-            QDir(tempDir).removeRecursively();
-            emit loadingError("Failed to create decompression handle");
+        emit loadingProgress(45, "Reading archive contents...");
+
+        // Stream the entry metadata out of the archive: the decompressed
+        // bytes are parsed on the fly and discarded, so no temp directory,
+        // no disk writes, sub-batch memory use.
+        ListContext ctx;
+        ctx.worker = this;
+        ctx.files = &files;
+
+        nvcomp_error_t result = nvcomp_list_archive_entries(
+            archivePath.toUtf8().constData(),
+            viewerEntryCallback,
+            viewerProgressCallback,
+            &ctx);
+
+        if (result == NVCOMP_ERROR_CANCELED) {
+            emit loadingError("Loading canceled");
             return false;
         }
-        
-        // Detect algorithm
-        nvcomp_algorithm_t algo = nvcomp_detect_algorithm_from_file(archivePath.toUtf8().constData());
-        if (algo == NVCOMP_ALGO_UNKNOWN) {
-            nvcomp_destroy_operation_handle(handle);
-            QDir(tempDir).removeRecursively();
-            emit loadingError("Unable to detect compression algorithm");
-            return false;
-        }
-        
-        // Decompress
-        bool useCPU = !nvcomp_is_cuda_available();
-        nvcomp_error_t result;
-        
-        if (useCPU) {
-            result = nvcomp_decompress_cpu(handle, algo,
-                archivePath.toUtf8().constData(),
-                tempDir.toUtf8().constData(),
-                nullptr);
-        } else {
-            result = nvcomp_decompress_gpu_batched(handle, algo,
-                archivePath.toUtf8().constData(),
-                tempDir.toUtf8().constData(),
-                nullptr);
-        }
-        
-        nvcomp_destroy_operation_handle(handle);
-        
         if (result != NVCOMP_SUCCESS) {
             const char* errorMsg = nvcomp_get_last_error();
-            QString errorStr = errorMsg ? QString(errorMsg) : "Unknown error";
-            QDir(tempDir).removeRecursively();
-            emit loadingError(QString("Decompression failed: %1").arg(errorStr));
+            emit loadingError(QString("Failed to read archive contents: %1")
+                .arg(errorMsg && *errorMsg ? QString(errorMsg) : "Unknown error"));
             return false;
         }
-        
-        emit loadingProgress(70, "Reading extracted files...");
-        
-        // Now read the extracted files to get the file list
-        QDir extractedDir(tempDir);
-        QDirIterator it(tempDir, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
-        
-        totalSize = 0;
-        totalCompressed = compressedFileSize;
-        int fileCount = 0;
-        
-        while (it.hasNext()) {
-            QString filePath = it.next();
-            QFileInfo fileInfo(filePath);
-            
-            // Get relative path from temp dir
-            QString relativePath = extractedDir.relativeFilePath(filePath);
-            
-            ArchiveFileInfo info;
-            info.path = relativePath;
-            info.name = fileInfo.fileName();
-            info.size = fileInfo.size();
-            info.compressedSize = 0;  // We don't have per-file compressed sizes
-            info.compressionRatio = 0.0;
-            info.isDirectory = false;
-            info.treeItem = nullptr;
-            
-            files.append(info);
-            totalSize += info.size;
-            fileCount++;
-            
-            if (fileCount % 10 == 0) {
-                int progress = 70 + (fileCount * 20 / qMax(1, fileCount + 1));
-                emit loadingProgress(progress, QString("Found %1 files...").arg(fileCount));
-            }
-        }
-        
-        // Calculate per-file compressed size estimate
-        if (fileCount > 0 && totalSize > 0) {
+
+        totalSize = ctx.totalSize;
+
+        // Per-file compressed sizes aren't stored in the archive; estimate
+        // from the global ratio (same presentation as before).
+        if (totalSize > 0) {
             double compressionRatio = (double)totalCompressed / totalSize;
             for (ArchiveFileInfo& info : files) {
                 info.compressedSize = (uint64_t)(info.size * compressionRatio);
                 info.compressionRatio = compressionRatio * 100.0;
             }
         }
-        
-        // Clean up temp directory
-        QDir(tempDir).removeRecursively();
-        
-        emit loadingProgress(95, QString("Loaded %1 files").arg(fileCount));
-        
+
+        emit loadingProgress(95, QString("Loaded %1 files").arg(files.count()));
         return true;
-        
+
     } catch (const std::exception& e) {
-        emit loadingError(QString("Exception during decompression: %1").arg(e.what()));
+        emit loadingError(QString("Exception while reading archive: %1").arg(e.what()));
         return false;
     } catch (...) {
-        emit loadingError("Unknown error during decompression");
+        emit loadingError("Unknown error while reading archive");
         return false;
     }
 }
@@ -373,6 +372,7 @@ ArchiveViewerDialog::ArchiveViewerDialog(const QString& archivePath, QWidget *pa
     , m_totalCompressed(0)
     , m_volumeCount(1)
     , m_loader(nullptr)
+    , m_searchDebounce(nullptr)
 {
     ui->setupUi(this);
     setupUi();
@@ -382,15 +382,16 @@ ArchiveViewerDialog::ArchiveViewerDialog(const QString& archivePath, QWidget *pa
 
 ArchiveViewerDialog::~ArchiveViewerDialog()
 {
-    // Clean up loader if it exists
+    // Clean up loader if it exists. Cooperative cancel + wait: terminate()
+    // would kill a thread that may be inside the CUDA driver.
     if (m_loader) {
         if (m_loader->isRunning()) {
-            m_loader->terminate();
+            m_loader->cancel();
             m_loader->wait();
         }
         delete m_loader;
     }
-    
+
     delete ui;
 }
 
@@ -408,7 +409,9 @@ void ArchiveViewerDialog::setupUi()
     ui->treeWidget->setColumnCount(4);
     ui->treeWidget->setHeaderLabels(QStringList() << "Name" << "Size" << "Compressed" << "Ratio");
     ui->treeWidget->setAlternatingRowColors(true);
-    ui->treeWidget->setSortingEnabled(true);
+    // Sorting stays off until populateTree() finishes: with sorting active,
+    // every insertion re-sorts, which hangs the UI on 100k-file archives.
+    ui->treeWidget->setUniformRowHeights(true);
     ui->treeWidget->setSelectionMode(QAbstractItemView::ExtendedSelection);
     ui->treeWidget->setContextMenuPolicy(Qt::CustomContextMenu);
     
@@ -435,7 +438,16 @@ void ArchiveViewerDialog::setupConnections()
     connect(ui->buttonClose, &QPushButton::clicked,
             this, &ArchiveViewerDialog::onCloseClicked);
     
-    // Connect search
+    // Connect search through a debounce timer: filtering walks every tree
+    // item, which is too slow to run per keystroke on 100k-file archives.
+    m_searchDebounce = new QTimer(this);
+    m_searchDebounce->setSingleShot(true);
+    m_searchDebounce->setInterval(250);
+    connect(m_searchDebounce, &QTimer::timeout, this, [this]() {
+        ui->treeWidget->setUpdatesEnabled(false);
+        filterTreeItems(ui->lineEditSearch->text());
+        ui->treeWidget->setUpdatesEnabled(true);
+    });
     connect(ui->lineEditSearch, &QLineEdit::textChanged,
             this, &ArchiveViewerDialog::onSearchTextChanged);
     
@@ -450,11 +462,21 @@ void ArchiveViewerDialog::setupConnections()
 
 void ArchiveViewerDialog::loadArchive()
 {
+    // Stop and drop any previous loader (Refresh re-enters here).
+    if (m_loader) {
+        if (m_loader->isRunning()) {
+            m_loader->cancel();
+            m_loader->wait();
+        }
+        delete m_loader;
+        m_loader = nullptr;
+    }
+
     // Clear existing data
     m_files.clear();
     m_folderItems.clear();
     ui->treeWidget->clear();
-    
+
     // Create and start loader worker
     m_loader = new ArchiveLoaderWorker(m_archivePath, this);
     
@@ -473,90 +495,110 @@ void ArchiveViewerDialog::loadArchive()
 
 void ArchiveViewerDialog::populateTree()
 {
+    // Bulk build: updates and sorting off, whole tree assembled detached,
+    // attached with a single addTopLevelItem, then one sort at the end.
+    // Anything else is quadratic at 100k items.
+    ui->treeWidget->setUpdatesEnabled(false);
+    ui->treeWidget->setSortingEnabled(false);
     ui->treeWidget->clear();
     m_folderItems.clear();
-    
-    // Create root item
+
+    const QIcon dirIcon = style()->standardIcon(QStyle::SP_DirIcon);
+    const QIcon fileIcon = style()->standardIcon(QStyle::SP_FileIcon);
+
+    // Create root item (detached until the tree is fully built)
     QFileInfo fileInfo(m_archivePath);
-    QTreeWidgetItem* rootItem = new QTreeWidgetItem(ui->treeWidget);
+    QTreeWidgetItem* rootItem = new QTreeWidgetItem();
     rootItem->setText(0, fileInfo.fileName());
     rootItem->setText(1, formatSize(m_totalSize));
     rootItem->setText(2, formatSize(m_totalCompressed));
-    rootItem->setText(3, QString("%1%").arg(m_totalSize > 0 ? 
+    rootItem->setText(3, QString("%1%").arg(m_totalSize > 0 ?
         (double)m_totalCompressed / m_totalSize * 100.0 : 0.0, 0, 'f', 1));
-    rootItem->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
-    rootItem->setExpanded(true);
-    
+    rootItem->setIcon(0, dirIcon);
+
     // Add files to tree
-    for (ArchiveFileInfo& fileInfo : m_files) {
+    for (ArchiveFileInfo& info : m_files) {
         // Skip directory entries
-        if (fileInfo.isDirectory) {
+        if (info.isDirectory) {
             continue;
         }
-        
+
         // Get or create parent folder
-        QFileInfo pathInfo(fileInfo.path);
-        QString folderPath = pathInfo.path();
+        int slash = info.path.lastIndexOf(QLatin1Char('/'));
         QTreeWidgetItem* parentItem = rootItem;
-        
-        if (!folderPath.isEmpty() && folderPath != ".") {
-            parentItem = getOrCreateFolderItem(folderPath);
+        if (slash > 0) {
+            parentItem = getOrCreateFolderItem(info.path.left(slash), rootItem, dirIcon);
         }
-        
+
         // Create file item
         QTreeWidgetItem* fileItem = new QTreeWidgetItem(parentItem);
-        fileItem->setText(0, fileInfo.name);
-        fileItem->setText(1, formatSize(fileInfo.size));
-        fileItem->setText(2, formatSize(fileInfo.compressedSize));
-        fileItem->setText(3, QString("%1%").arg(fileInfo.compressionRatio, 0, 'f', 1));
-        fileItem->setIcon(0, style()->standardIcon(QStyle::SP_FileIcon));
-        
+        fileItem->setText(0, info.name);
+        fileItem->setText(1, formatSize(info.size));
+        fileItem->setText(2, formatSize(info.compressedSize));
+        fileItem->setText(3, QString("%1%").arg(info.compressionRatio, 0, 'f', 1));
+        fileItem->setIcon(0, fileIcon);
+
         // Store reference to tree item
-        fileInfo.treeItem = fileItem;
-        
+        info.treeItem = fileItem;
+
         // Store file info in item data
-        fileItem->setData(0, Qt::UserRole, QVariant::fromValue(fileInfo.path));
+        fileItem->setData(0, Qt::UserRole, QVariant::fromValue(info.path));
     }
-    
-    // Sort by name
+
+    // Single attach of the whole tree, then one sort.
+    ui->treeWidget->addTopLevelItem(rootItem);
     ui->treeWidget->sortItems(0, Qt::AscendingOrder);
+    ui->treeWidget->setSortingEnabled(true);
+    ui->treeWidget->setUpdatesEnabled(true);
+
+    // Expand the root and any single-child folder chain below it, so an
+    // archive wrapping one top-level folder opens straight to its contents.
+    rootItem->setExpanded(true);
+    for (QTreeWidgetItem* item = rootItem;
+         item->childCount() == 1 && item->child(0)->childCount() > 0;
+         item = item->child(0)) {
+        item->child(0)->setExpanded(true);
+    }
 }
 
-QTreeWidgetItem* ArchiveViewerDialog::getOrCreateFolderItem(const QString& folderPath)
+QTreeWidgetItem* ArchiveViewerDialog::getOrCreateFolderItem(const QString& folderPath,
+                                                            QTreeWidgetItem* rootItem,
+                                                            const QIcon& dirIcon)
 {
     // Check if folder item already exists
-    if (m_folderItems.contains(folderPath)) {
-        return m_folderItems[folderPath];
+    auto it = m_folderItems.constFind(folderPath);
+    if (it != m_folderItems.constEnd()) {
+        return it.value();
     }
-    
+
     // Split path into components
-    QStringList parts = folderPath.split(QRegularExpression("[/\\\\]"), Qt::SkipEmptyParts);
-    
-    QTreeWidgetItem* parentItem = ui->treeWidget->topLevelItem(0);  // Root item
+    QStringList parts = folderPath.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+
+    QTreeWidgetItem* parentItem = rootItem;
     QString currentPath;
-    
+
     for (const QString& part : parts) {
         if (!currentPath.isEmpty()) {
             currentPath += "/";
         }
         currentPath += part;
-        
+
         // Check if this level exists
-        if (m_folderItems.contains(currentPath)) {
-            parentItem = m_folderItems[currentPath];
+        auto found = m_folderItems.constFind(currentPath);
+        if (found != m_folderItems.constEnd()) {
+            parentItem = found.value();
             continue;
         }
-        
+
         // Create new folder item
         QTreeWidgetItem* folderItem = new QTreeWidgetItem(parentItem);
         folderItem->setText(0, part);
-        folderItem->setIcon(0, style()->standardIcon(QStyle::SP_DirIcon));
-        folderItem->setExpanded(false);
-        
+        folderItem->setIcon(0, dirIcon);
+
         m_folderItems[currentPath] = folderItem;
         parentItem = folderItem;
     }
-    
+
     return parentItem;
 }
 
@@ -799,7 +841,8 @@ void ArchiveViewerDialog::onCloseClicked()
 
 void ArchiveViewerDialog::onSearchTextChanged(const QString& text)
 {
-    filterTreeItems(text);
+    Q_UNUSED(text);
+    m_searchDebounce->start();  // restart the 250 ms debounce window
 }
 
 void ArchiveViewerDialog::onTreeItemDoubleClicked(QTreeWidgetItem* item, int column)

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+#include <cerrno>
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
@@ -877,14 +878,17 @@ static void writeFileFast(const fs::path& path, const uint8_t* data, size_t n,
 #else
     int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
-        throw std::runtime_error("Failed to create output file: " + path.string());
+        throw std::runtime_error("Failed to create output file: " + path.string()
+                                 + " (" + std::strerror(errno) + ")");
     }
     size_t off = 0;
     while (off < n) {
         ssize_t w = ::write(fd, data + off, n - off);
         if (w <= 0) {
+            int err = errno;
             ::close(fd);
-            throw std::runtime_error("Failed to write output file: " + path.string());
+            throw std::runtime_error("Failed to write output file: " + path.string()
+                                     + " (" + std::strerror(err) + ")");
         }
         off += static_cast<size_t>(w);
     }
@@ -1041,7 +1045,8 @@ struct ArchiveExtractor::Impl {
                                     static_cast<std::streamsize>(take));
                     if (!spanFile_) {
                         throw std::runtime_error(
-                            "Failed to write output file: " + fullPath_.string());
+                            "Failed to write output file: " + fullPath_.string()
+                            + " (" + std::strerror(errno) + ")");
                     }
                     bytesWritten_.fetch_add(take, std::memory_order_relaxed);
                 }
@@ -1344,8 +1349,142 @@ void listArchive(const std::vector<uint8_t>& archiveData) {
         totalUnit = "KB";
     }
     
-    std::cout << "Total: " << std::fixed << std::setprecision(2) 
+    std::cout << "Total: " << std::fixed << std::setprecision(2)
               << totalDisplaySize << " " << totalUnit << std::endl;
+}
+
+// ============================================================================
+// Archive Metadata Scanning
+// ============================================================================
+
+ArchiveMetadataScanner::ArchiveMetadataScanner(EntryFn onEntry)
+    : onEntry_(std::move(onEntry)) {}
+
+// Same accumulation idiom as ArchiveExtractor::Impl::fill(): gather exactly
+// `need` contiguous bytes, parsing in place (no copy) when possible.
+const uint8_t* ArchiveMetadataScanner::fill(size_t need, const uint8_t*& p, size_t& n) {
+    if (carry_.empty() && n >= need) {
+        const uint8_t* r = p;
+        p += need;
+        n -= need;
+        return r;
+    }
+    size_t take = std::min(need - carry_.size(), n);
+    carry_.insert(carry_.end(), p, p + take);
+    p += take;
+    n -= take;
+    return carry_.size() == need ? carry_.data() : nullptr;
+}
+
+void ArchiveMetadataScanner::fileDone() {
+    filesDone_++;
+    state_ = filesDone_ == header_.fileCount ? State::Done : State::Entry;
+}
+
+void ArchiveMetadataScanner::feed(const uint8_t* data, size_t n) {
+    const uint8_t* p = data;
+    while (n > 0) {
+        switch (state_) {
+        case State::Header: {
+            const uint8_t* b = fill(sizeof(ArchiveHeader), p, n);
+            if (!b) break;
+            std::memcpy(&header_, b, sizeof(ArchiveHeader));
+            carry_.clear();
+            if (header_.magic != ARCHIVE_MAGIC) {
+                throw std::runtime_error("Invalid archive: bad magic number");
+            }
+            if (header_.version < 1 || header_.version > ARCHIVE_VERSION) {
+                throw std::runtime_error("Unsupported archive version");
+            }
+            state_ = header_.fileCount == 0 ? State::Done : State::Entry;
+            break;
+        }
+        case State::Entry: {
+            // v1 entries are 16 bytes (no mode/mtime); v2 are 24 bytes.
+            const bool v1 = header_.version < 2;
+            const size_t entryBytes = v1 ? sizeof(FileEntryV1) : sizeof(FileEntry);
+            const uint8_t* b = fill(entryBytes, p, n);
+            if (!b) break;
+            if (v1) {
+                FileEntryV1 e1;
+                std::memcpy(&e1, b, sizeof(FileEntryV1));
+                entry_.pathLength = e1.pathLength;
+                entry_.mode = 0;
+                entry_.fileSize = e1.fileSize;
+                entry_.mtimeNs = 0;
+            } else {
+                std::memcpy(&entry_, b, sizeof(FileEntry));
+            }
+            carry_.clear();
+            if (entry_.pathLength == 0 || entry_.pathLength > (1u << 20)) {
+                throw std::runtime_error("Invalid archive: bad path length");
+            }
+            state_ = State::Path;
+            break;
+        }
+        case State::Path: {
+            const uint8_t* b = fill(entry_.pathLength, p, n);
+            if (!b) break;
+            ArchiveEntry e;
+            e.relativePath.assign(reinterpret_cast<const char*>(b), entry_.pathLength);
+            e.fileSize = entry_.fileSize;
+            e.mode = entry_.mode;
+            e.mtimeNs = entry_.mtimeNs;
+            carry_.clear();
+            entriesEmitted_++;
+            if (!onEntry_(e)) {
+                throw ListingCanceled();
+            }
+            if (entry_.fileSize == 0) {
+                fileDone();
+            } else {
+                dataRemaining_ = entry_.fileSize;
+                state_ = State::Data;
+            }
+            break;
+        }
+        case State::Data: {
+            size_t take = static_cast<size_t>(std::min<uint64_t>(dataRemaining_, n));
+            p += take;
+            n -= take;
+            dataRemaining_ -= take;
+            if (dataRemaining_ == 0) {
+                fileDone();
+            }
+            break;
+        }
+        case State::Done:
+            throw std::runtime_error("Invalid archive: data past the last file entry");
+        }
+        // fill() consumes all of n on partial fields, ending the loop.
+    }
+}
+
+uint64_t ArchiveMetadataScanner::skippableBytes() const {
+    return state_ == State::Data ? dataRemaining_ : 0;
+}
+
+void ArchiveMetadataScanner::skip(uint64_t n) {
+    if (state_ != State::Data || n > dataRemaining_) {
+        throw std::runtime_error("ArchiveMetadataScanner::skip: not skippable");
+    }
+    dataRemaining_ -= n;
+    if (dataRemaining_ == 0) {
+        fileDone();
+    }
+}
+
+bool ArchiveMetadataScanner::done() const {
+    return state_ == State::Done;
+}
+
+bool ArchiveMetadataScanner::metadataComplete() const {
+    // Header must have been parsed; after that, fileCount is authoritative.
+    return state_ != State::Header && entriesEmitted_ == header_.fileCount;
+}
+
+uint32_t ArchiveMetadataScanner::fileCount() const {
+    return header_.fileCount;
 }
 
 } // namespace nvcomp_core

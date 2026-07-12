@@ -162,20 +162,23 @@ class NvcompMenuProvider(GObject.GObject, Nautilus.MenuProvider):
                 return True
         return False
     
-    def _run_nvcomp_gui(self, files: List[str], compress: bool = False, 
-                       algorithm: Optional[str] = None) -> None:
+    def _run_nvcomp_gui(self, files: List[str], compress: bool = False,
+                       algorithm: Optional[str] = None,
+                       extra_args: Optional[List[str]] = None) -> None:
         """Launch nvCOMP GUI with files."""
         if not self.nvcomp_gui_path:
-            self._show_error("nvCOMP GUI not found", 
+            self._show_error("nvCOMP GUI not found",
                            "Please install nvCOMP or add it to your PATH")
             return
-        
+
         cmd = [self.nvcomp_gui_path]
-        
+
         # Add command-line options
         if compress and algorithm:
             cmd.extend(['--compress', '--algorithm', algorithm])
-        
+        if extra_args:
+            cmd.extend(extra_args)
+
         # Add files
         for file_path in files:
             cmd.extend(['--add-file', file_path])
@@ -196,15 +199,14 @@ class NvcompMenuProvider(GObject.GObject, Nautilus.MenuProvider):
             self._show_error("Failed to launch nvCOMP", str(e))
     
     def _extract_here(self, files: List[str]) -> None:
-        """Extract archives to current directory."""
-        # For now, open in GUI for extraction
-        # In future, could add direct extraction support
-        self._run_nvcomp_gui(files, compress=False)
-    
+        """Extract archives to the directory they live in."""
+        # --extract-here starts extraction immediately, outputting next to
+        # the archive (the GUI derives the directory from the archive path).
+        self._run_nvcomp_gui(files, compress=False, extra_args=['--extract-here'])
+
     def _extract_to_folder(self, files: List[str]) -> None:
-        """Extract archives to new folder."""
-        # Open in GUI, user can choose extraction location
-        self._run_nvcomp_gui(files, compress=False)
+        """Extract archives to a folder chosen in the GUI."""
+        self._run_nvcomp_gui(files, compress=False, extra_args=['--decompress'])
     
     def _show_error(self, title: str, message: str) -> None:
         """Show error notification."""
