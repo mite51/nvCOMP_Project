@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.24)
 project(nvcomp_core LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -6,7 +6,7 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Find nvCOMP package (should be configured from parent)
-find_package(nvcomp REQUIRED)
+find_package(nvcomp ${NVCOMP_SDK_VERSION} EXACT CONFIG REQUIRED)
 
 # Core library sources
 set(CORE_SOURCES

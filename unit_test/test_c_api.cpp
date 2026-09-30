@@ -13,6 +13,8 @@
  */
 
 #include "nvcomp_c_api.h"
+#include <nvcomp.h>
+#include <nvcomp/version.h>
 #include <iostream>
 #include <sstream>
 #include <cstdio>
@@ -384,7 +386,11 @@ void test_archive_listing() {
         auto it = expected.find(e.path);
         ASSERT_TRUE(it != expected.end(), ("Unexpected entry: " + e.path).c_str());
         ASSERT_EQ(e.size, it->second, ("Size mismatch for " + e.path).c_str());
+#ifdef _WIN32
+        ASSERT_EQ(e.mode, uint32_t(0), "Windows archives should leave POSIX mode unspecified");
+#else
         ASSERT_TRUE(e.mode != 0, "v2 archives should carry POSIX modes");
+#endif
         ASSERT_TRUE(e.mtimeNs != 0, "v2 archives should carry mtimes");
     }
 
@@ -913,6 +919,20 @@ void test_callback_count_bounded() {
 // Main Test Runner
 // ============================================================================
 
+void test_sdk_runtime_version() {
+    TEST_START("nvCOMP runtime matches build headers");
+    nvcompProperties_t properties{};
+    ASSERT_TRUE(nvcompGetProperties(&properties) == nvcompSuccess,
+                "Should query nvCOMP runtime properties");
+    std::cout << "  nvCOMP runtime: " << NVCOMP_STREAM_VER(properties.version)
+              << ", CUDA runtime build: " << properties.cudart_version << std::endl;
+    ASSERT_TRUE(properties.version == NVCOMP_VER,
+                "Loaded SDK runtime must match the build headers");
+    ASSERT_TRUE(properties.cudart_version / 1000 == 13,
+                "Loaded SDK runtime must use the selected CUDA 13 variant");
+    TEST_PASS();
+}
+
 int main() {
     std::cout << "========================================" << std::endl;
     std::cout << "nvcomp_core C API Test Suite" << std::endl;
@@ -926,6 +946,7 @@ int main() {
     nvcomp_create_directories("output/test_c_api/.placeholder");
     
     // Run tests
+    test_sdk_runtime_version();
     test_error_handling();
     test_algorithm_functions();
     test_file_operations();

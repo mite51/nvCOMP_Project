@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+cmake_minimum_required(VERSION 3.24)
 
 # Linux: Fix for CUDA with newer glibc (Ubuntu 24.04, etc.)
 # CUDA 12.x has issues with GCC 13+ and glibc 2.39+ due to C23 features
@@ -22,6 +22,12 @@ if(UNIX AND NOT APPLE)
 endif()
 
 project(NvCompCLI LANGUAGES CXX CUDA)
+
+# The pinned nvCOMP redistributable is built for CUDA 13.
+if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0 OR
+   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 14.0)
+    message(FATAL_ERROR "This build requires CUDA Toolkit 13.x for nvCOMP 5.3.0 (cuda13).")
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -48,11 +54,15 @@ include(FetchContent)
 
 message(STATUS "Detecting platform for nvCOMP download...")
 
+set(NVCOMP_SDK_VERSION "5.3.0.16")
+# Hashes from NVIDIA's redistrib_5.3.0.json manifest.
 if(WIN32)
-    set(NVCOMP_URL "https://developer.download.nvidia.com/compute/nvcomp/redist/nvcomp/windows-x86_64/nvcomp-windows-x86_64-5.1.0.21_cuda13-archive.zip")
+    set(NVCOMP_URL "https://developer.download.nvidia.com/compute/nvcomp/redist/nvcomp/windows-x86_64/nvcomp-windows-x86_64-${NVCOMP_SDK_VERSION}_cuda13-archive.zip")
+    set(NVCOMP_SHA256 "f5d8573d6dd48f40c394d19a26bb96fc3b94cd3a6f74fff43dd32e6df141c70d")
     message(STATUS "Platform: Windows")
 elseif(UNIX AND NOT APPLE)
-    set(NVCOMP_URL "https://developer.download.nvidia.com/compute/nvcomp/redist/nvcomp/linux-x86_64/nvcomp-linux-x86_64-5.1.0.21_cuda13-archive.tar.xz")
+    set(NVCOMP_URL "https://developer.download.nvidia.com/compute/nvcomp/redist/nvcomp/linux-x86_64/nvcomp-linux-x86_64-${NVCOMP_SDK_VERSION}_cuda13-archive.tar.xz")
+    set(NVCOMP_SHA256 "2c36f5af63c37e4afe13d14f912e84130e6a05f07b066547b3e028c4ca54c866")
     message(STATUS "Platform: Linux")
 else()
     message(FATAL_ERROR "Unsupported platform")
@@ -61,6 +71,8 @@ endif()
 FetchContent_Declare(
     nvcomp_archive
     URL ${NVCOMP_URL}
+    URL_HASH SHA256=${NVCOMP_SHA256}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
 FetchContent_GetProperties(nvcomp_archive)
@@ -196,7 +208,16 @@ endif()
 # Find nvCOMP package
 # ============================================================================
 
-find_package(nvcomp REQUIRED)
+# Bind headers, import libraries and copied runtimes to the same SDK even when
+# an existing CMake cache still points at an older nvcomp_DIR.
+set(nvcomp_DIR "${NVCOMP_PATH}/lib/cmake/nvcomp")
+foreach(NVCOMP_LOCATION nvcomp_INCLUDE_DIR nvcomp_LIBRARY_DIR nvcomp_BINARY_DIR)
+    unset(${NVCOMP_LOCATION} CACHE)
+    unset(${NVCOMP_LOCATION})
+endforeach()
+find_package(nvcomp ${NVCOMP_SDK_VERSION} EXACT CONFIG REQUIRED
+    PATHS "${nvcomp_DIR}" NO_DEFAULT_PATH)
+message(STATUS "nvCOMP SDK version: ${nvcomp_VERSION} (CUDA 13)")
 
 # ============================================================================
 # Find Qt6 (if building GUI)
@@ -668,10 +689,11 @@ if(WIN32 AND BUILD_GUI)
                 -ext WixUIExtension
                 -ext WixUtilExtension
                 -dBuildConfiguration=$<CONFIG>
+                "-dSourceDir=$<TARGET_FILE_DIR:nvcomp_gui>"
                 -out "${WIX_OUTPUT_DIR}/"
                 ${WIX_SOURCES}
             WORKING_DIRECTORY "${WIX_SOURCE_DIR}"
-            DEPENDS ${WIX_SOURCES} nvcomp_gui
+            DEPENDS ${WIX_SOURCES} "${WIX_SOURCE_DIR}/product.wxi" nvcomp_gui
             COMMENT "Compiling WiX installer sources..."
         )
         

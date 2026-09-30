@@ -30,9 +30,9 @@ gui/
 ### Prerequisites
 
 - Qt 6.2 or later (with Widgets module)
-- CMake 3.18+
+- CMake 3.24+
 - C++17 compiler
-- CUDA Toolkit (for core library)
+- CUDA Toolkit 13.x (for core library and nvCOMP 5.3.0)
 
 ### Build Steps
 

@@ -52,10 +52,14 @@
   <?define MinWindowsVersion = "10.0.17763" ?>
   
   <!-- Build configuration -->
-  <?define BuildConfiguration = "Release" ?>
+  <?ifndef BuildConfiguration ?>
+    <?define BuildConfiguration = "Release" ?>
+  <?endif ?>
   
   <!-- Source directories (relative to installer.wxs location) -->
-  <?define SourceDir = "..\..\..\build_gui\gui\Release" ?>
+  <?ifndef SourceDir ?>
+    <?define SourceDir = "..\..\..\build_gui\gui\$(var.BuildConfiguration)" ?>
+  <?endif ?>
   <?define ResourceDir = "..\..\gui\resources" ?>
   <?define LicenseDir = "..\..\.." ?>
   

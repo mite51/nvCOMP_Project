@@ -16,7 +16,7 @@ set FAIL_COUNT=0
 REM Create output directory
 if not exist output mkdir output
 
-set EXE=..\build\Release\nvcomp_cli.exe
+if not defined EXE set EXE=..\build\Release\nvcomp_cli.exe
 if not exist %EXE% (
     set EXE=..\build\x64\Release\nvcomp_cli.exe
 )

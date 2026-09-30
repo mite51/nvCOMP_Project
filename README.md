@@ -92,10 +92,12 @@ nvCOMP integrates with Linux desktop environments (GNOME, KDE, XFCE) following f
 ### Prerequisites
 
 **Core Requirements:**
-- CMake 3.18 or higher
-- CUDA Toolkit 11.0 or higher (optional for CPU-only mode)
+- CMake 3.24 or higher
+- CUDA Toolkit 13.x (required to build; the downloaded nvCOMP SDK uses CUDA 13)
 - NVIDIA GPU with Compute Capability 7.5+ (optional, will use CPU fallback if not available)
 - C++17 compatible compiler
+- A CUDA 13-compatible NVIDIA driver for GPU operations. CPU fallback is a runtime
+  option; it does not remove the CUDA Toolkit build requirement.
 - **Linux specific**: GCC-12 recommended for CUDA compatibility (auto-detected by CMake)
   - Ubuntu 24.04+: `sudo apt-get install gcc-12 g++-12`
   - CMake automatically uses GCC-12 for CUDA when available
@@ -149,6 +151,58 @@ The build system automatically:
 - Fetches and builds LZ4, Snappy, and Zstd dependencies
 - Downloads Qt 6.8.0 if building GUI and Qt not found
 - Patches old CMake version requirements in dependencies
+
+### nvCOMP SDK upgrades and compatibility checks
+
+The build pins nvCOMP **5.3.0.16 for CUDA 13** on Windows and Linux x86_64.
+Download hashes come from NVIDIA's
+[5.3.0 release manifest](https://developer.download.nvidia.com/compute/nvcomp/redist/redistrib_5.3.0.json).
+Configuration checks the exact SDK version and clears cached SDK include/library
+locations before discovery. A fresh build directory is recommended for upgrades.
+Keep an older executable beside its matching core and SDK libraries when testing
+backward compatibility; replacing only its SDK DLLs does not preserve a baseline.
+
+The optional Python 3.9+ compatibility harness generates its own fixtures. Run
+the baseline phase before upgrading, then compare using the same work directory:
+
+```powershell
+python unit_test/test_sdk_compat.py --phase baseline --baseline output/nvcomp51-baseline/nvcomp_cli.exe --work output/sdk-compat
+python unit_test/test_sdk_compat.py --phase compare --baseline output/nvcomp51-baseline/nvcomp_cli.exe --candidate out/nvcomp53/Release/nvcomp_cli.exe --work output/sdk-compat
+ctest --test-dir out/nvcomp53 -C Release --output-on-failure
+```
+
+Use a new work directory for each baseline. The harness keeps archives, extraction
+results, process logs and timing/failure JSON files. It checks all six algorithms,
+CPU/GPU interoperability, chunk boundaries, empty files, multiple volumes, file
+contents and modification times. Process failures produce a nonzero exit even
+when the extracted contents match. The Windows batch suites also accept an `EXE`
+environment variable to select a CLI from a separate build directory.
+
+**5.3 upgrade validation (2026-09-30):** Windows, RTX 4090, driver 591.86,
+CUDA Toolkit 13.0.88, MSVC 19.38, Qt 6.8.0, Release configuration.
+
+- 20 C API checks passed, including verification of the loaded SDK version.
+- 46 GUI checks passed; one existing archive-viewer test skipped because its
+  hard-coded sample archive is absent. Headless execution used Qt's offscreen
+  plugin from the Qt installation.
+- 38 CLI/folder/volume checks passed. All 90 cross-version content/mtime checks
+  passed. The old 5.1 reader still crashed after successful extraction in two
+  single-volume manager-codec comparisons; all 5.3 processes exited successfully.
+- The MSI's SDK DLL hashes matched the downloaded SDK. The extracted GUI launched
+  with a clean PATH, and LZ4/Snappy/Zstd automatically fell back to CPU with no
+  visible GPU.
+- On a 128 MiB mixed-data input, the median of three runs after warm-up showed ANS
+  compression taking 0.432 s versus 0.507 s with 5.1. Other measured operation
+  times differed by about 3% or less; peak host memory was comparable. These are
+  local end-to-end measurements, not general throughput guarantees. Peak VRAM
+  was not measured.
+- Linux compilation, packaging and POSIX metadata checks remain unverified here:
+  the available Ubuntu environment lacks a C++ compiler and CUDA Toolkit.
+
+For a repeatable comparison on real data, use the
+[Silesia corpus benchmark](bench/SILESIA.md). It tests all six algorithms on 12
+verified corpus files and the combined folder, recording speed, compressed size
+and byte-exact extraction results for both SDK builds.
 
 ## Usage
 
@@ -717,7 +771,8 @@ overlap on rotating CUDA streams with pinned staging buffers.
    - **Automatic Fallback**: insufficient VRAM falls back to CPU for cross-compatible algorithms
    - **Customization**: `--volume-size` controls on-disk volume splitting; `--no-volumes` disables splitting (now safe for batched algorithms even for very large files)
 
-2. **CUDA Version**: Requires CUDA 11.0+. Tested with CUDA 12.x and 13.x.
+2. **CUDA Version**: This build requires CUDA Toolkit 13.x and pins the CUDA 13
+   variant of nvCOMP 5.3.0. CUDA 12 SDK packages are not selected by this build.
 
 3. **Volume Memory**: Each volume must fit in memory during processing. Default 2.5GB volumes are safe for most systems.
 
@@ -798,7 +853,8 @@ For very large datasets:
 All dependencies are automatically fetched and built by CMake:
 
 **Core Dependencies:**
-- **nvCOMP 5.1.0**: NVIDIA compression library
+- **nvCOMP 5.3.0** (SDK build 5.3.0.16, CUDA 13): NVIDIA compression library,
+  downloaded with SHA-256 verification for Windows and Linux x86_64
 - **LZ4 1.9.4**: Fast compression library
 - **Snappy 1.2.1**: Fast compression library by Google
 - **Zstd 1.5.5**: Compression by Facebook

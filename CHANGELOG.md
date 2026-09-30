@@ -2,6 +2,39 @@
 
 All notable changes to the nvCOMP CLI project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Upgrade the Windows and Linux x86_64 nvCOMP SDK from 5.1.0.21 to 5.3.0.16
+  (nvCOMP 5.3.0, CUDA 13). Verify downloads against NVIDIA's SHA-256 hashes and
+  require the exact package version to prevent accidentally linking an older SDK.
+- Require CUDA Toolkit 13.x and CMake 3.24+ for builds. Preserve existing codec
+  settings and archive format versions.
+- Add a cross-version CLI compatibility harness covering all six algorithms,
+  CPU/GPU interoperability, chunk boundaries, empty files, multiple volumes,
+  and preservation of file contents and modification times.
+- Build the Windows installer using the current GUI output directory, so a
+  fresh build cannot accidentally package SDK DLLs from an older build_gui tree.
+
+### Added
+
+- A repeatable Silesia corpus benchmark (`bench/silesia.py`) comparing two CLI
+  builds on 12 verified real-world files and the combined folder. Records
+  warm-ups, repeated timings, compression ratios, process failures and SHA-256
+  extraction checks; see `bench/SILESIA.md` for usage and methodology.
+
+### Validation
+
+- Windows Release build, 20 C API checks, 46 GUI checks (one missing-fixture skip),
+  and 38 CLI/folder/volume checks passed on an RTX 4090 with CUDA Toolkit 13.0.
+- All 90 cross-version content/mtime comparisons passed. Old 5.1 manager readers
+  retained post-extraction crashes in two comparisons; the upgraded readers
+  completed cleanly. Existing archive versions and CPU codec dependencies remain
+  unchanged.
+- Verified packaged SDK hashes, GUI startup and automatic CPU fallback. Linux
+  build/runtime validation remains pending. See README for benchmark details.
+
 ## [3.4.0] - 2026-07-09
 
 ### Major Themes: File Properties (Archive v2), Multi-Volume GUI Viewing, Desktop Integration Fixes
