@@ -31,8 +31,8 @@ fi
 mkdir -p output
 
 # Find executable
-EXE="../build/nvcomp_cli"
-if [ ! -f "$EXE" ]; then
+EXE="${EXE:-../build/nvcomp_cli}"
+if [ ! -f "$EXE" ] && [ "$EXE" = "../build/nvcomp_cli" ]; then
     EXE="../build/Release/nvcomp_cli"
 fi
 if [ ! -f "$EXE" ]; then
@@ -53,7 +53,7 @@ run_test() {
     
     # Compress
     echo "  Compressing..."
-    if ! $EXE -c sample.txt output/test.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -c sample.txt output/test.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -62,7 +62,7 @@ run_test() {
     # Decompress
     echo "  Decompressing..."
     rm -rf output/restored
-    if ! $EXE -d output/test.$ALGO output/restored $ALGO $FLAGS; then
+    if ! "$EXE" -d output/test.$ALGO output/restored $ALGO $FLAGS; then
         echo "  FAILED: Decompression failed"
         ((FAIL_COUNT++))
         return 1
@@ -93,7 +93,7 @@ run_cross_test() {
     
     # Compress with GPU
     echo "  Compressing with GPU..."
-    if ! $EXE -c sample.txt output/test.$ALGO $ALGO; then
+    if ! "$EXE" -c sample.txt output/test.$ALGO $ALGO; then
         echo "  FAILED: GPU Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -102,7 +102,7 @@ run_cross_test() {
     # Decompress with CPU
     echo "  Decompressing with CPU..."
     rm -rf output/restored
-    if ! $EXE -d output/test.$ALGO output/restored $ALGO --cpu; then
+    if ! "$EXE" -d output/test.$ALGO output/restored $ALGO --cpu; then
         echo "  FAILED: CPU Decompression failed"
         ((FAIL_COUNT++))
         return 1

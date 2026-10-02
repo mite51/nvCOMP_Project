@@ -1,0 +1,84 @@
+Source: nvcomp-gui
+Section: utils
+Priority: optional
+Maintainer: nvCOMP Project <support@nvcomp.example.com>
+Build-Depends: debhelper-compat (= 13),
+               cmake (>= 3.24),
+               g++-12 | g++ (>= 10),
+               cuda-toolkit-13-0 | nvidia-cuda-toolkit (>= 13.0),
+               qt6-base-dev (>= 6.2),
+               qt6-base-dev-tools,
+               libqt6core6,
+               libqt6widgets6,
+               libqt6gui6
+Standards-Version: 4.6.2
+Homepage: https://github.com/NVIDIA/nvcomp
+Vcs-Git: https://github.com/nvcomp/nvcomp-gui.git
+Rules-Requires-Root: no
+
+Package: nvcomp-gui
+Architecture: amd64
+Depends: nvcomp-cli (= ${binary:Version}), ${shlibs:Depends}, ${misc:Depends},
+         libstdc++6 (>= 10),
+         libc6 (>= 2.31)
+Recommends: nvidia-driver (>= 580) | nvidia-driver-580,
+            python3-nautilus,
+            python3-gi,
+            gir1.2-nautilus-4.0,
+            zenity
+Suggests: nvidia-smi
+Description: GPU-accelerated compression tool with Qt GUI
+ nvCOMP is a high-performance compression toolkit that leverages
+ NVIDIA CUDA for GPU-accelerated compression and decompression.
+ It supports multiple algorithms including LZ4, Zstd, Snappy,
+ GDeflate, ANS, and Bitcomp.
+ .
+ Features:
+  - Modern Qt6 graphical interface
+  - Automatic GPU/CPU fallback
+  - Multi-volume support for large files
+  - Folder/directory compression
+  - Cross-platform compatibility
+  - Desktop integration (file associations, context menus)
+ .
+ This package includes the GUI application, CLI tool, and
+ file manager integration for Nautilus and Nemo.
+
+Package: nvcomp-cli
+Architecture: amd64
+Breaks: nvcomp-gui (<< 1.0.0-2)
+Replaces: nvcomp-gui (<< 1.0.0-2)
+Depends: ${shlibs:Depends}, ${misc:Depends},
+         libstdc++6 (>= 10),
+         libc6 (>= 2.31)
+Recommends: nvidia-driver (>= 580) | nvidia-driver-580
+Suggests: nvidia-smi
+Description: GPU-accelerated compression tool (CLI only)
+ nvCOMP is a high-performance compression toolkit that leverages
+ NVIDIA CUDA for GPU-accelerated compression and decompression.
+ .
+ This package provides only the command-line interface (CLI)
+ for nvcomp without GUI dependencies. It's ideal for servers
+ and automation.
+ .
+ Supported algorithms:
+  - LZ4 (fast, good ratio)
+  - Zstd (best ratio)
+  - Snappy (fastest)
+  - GDeflate, ANS, Bitcomp (GPU-only)
+
+Package: nvcomp-dev
+Architecture: amd64
+Depends: nvcomp-gui (= ${binary:Version}) | nvcomp-cli (= ${binary:Version}),
+         ${misc:Depends}
+Description: Development files for nvCOMP
+ Development headers and libraries for nvCOMP compression
+ toolkit. Allows developers to integrate nvCOMP functionality
+ into their own applications.
+ .
+ This package contains:
+  - C and C++ header files
+  - Static and shared libraries
+  - Example code
+  - API documentation
+

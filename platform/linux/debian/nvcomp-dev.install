@@ -1,0 +1,9 @@
+# Installation files for nvcomp-dev package (development headers)
+
+# Headers
+core/include/*.h usr/include/nvcomp/
+core/include/*.hpp usr/include/nvcomp/
+
+# Development documentation
+README.md usr/share/doc/nvcomp-dev/
+

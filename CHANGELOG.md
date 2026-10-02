@@ -11,6 +11,8 @@ All notable changes to the nvCOMP CLI project will be documented in this file.
   require the exact package version to prevent accidentally linking an older SDK.
 - Require CUDA Toolkit 13.x and CMake 3.24+ for builds. Preserve existing codec
   settings and archive format versions.
+- Allow Linux shell suites to select a fresh build through `EXE`, including
+  executable paths containing spaces, matching the Windows test suites.
 - Add a cross-version CLI compatibility harness covering all six algorithms,
   CPU/GPU interoperability, chunk boundaries, empty files, multiple volumes,
   and preservation of file contents and modification times.
@@ -32,8 +34,23 @@ All notable changes to the nvCOMP CLI project will be documented in this file.
   retained post-extraction crashes in two comparisons; the upgraded readers
   completed cleanly. Existing archive versions and CPU codec dependencies remain
   unchanged.
-- Verified packaged SDK hashes, GUI startup and automatic CPU fallback. Linux
-  build/runtime validation remains pending. See README for benchmark details.
+- Verified Windows packaged SDK hashes, GUI startup and automatic CPU fallback.
+- Linux Release validation passed on Ubuntu 24.04.5 / RTX 5090 / CUDA 13.0:
+  20 C API, 46 GUI (one missing-fixture skip), 38 CLI/folder/volume, 6 listing,
+  6 POSIX metadata, and 13 legacy-fixture checks. All 90 SDK comparison checks
+  passed, with no process failures in either the 5.1 or 5.3 builds. Automatic
+  CPU fallback and rejection of GPU-only codecs without a GPU also passed.
+- Corrected Linux packages bundle nvCOMP/CUDA runtime libraries and licenses;
+  extracted packages passed all six GPU codecs, three CPU fallback round-trips
+  and GUI startup checks. The GUI depends on the matching CLI package.
+- Settings initialization, preference reload, Restore Defaults and cancelled
+  integration removal no longer modify desktop installation. Regression checks
+  preserve an existing launcher. All 48 GUI and 28 Nautilus checks now pass with
+  no skips, using isolated test profiles and the repository sample archive.
+- Track Debian packaging sources, require CUDA 13 in the package build, preserve
+  build failure status, fix launcher/icon paths, and keep package maintenance
+  out of user profiles. Generated Linux test artifacts were removed after
+  validation; source fixtures and existing builds were retained.
 
 ## [3.4.0] - 2026-07-09
 

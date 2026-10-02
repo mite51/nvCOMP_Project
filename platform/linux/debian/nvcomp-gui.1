@@ -1,0 +1,110 @@
+.TH NVCOMP-GUI 1 "December 2025" "nvCOMP 1.0.0" "User Commands"
+.SH NAME
+nvcomp-gui \- GPU-accelerated compression tool with graphical interface
+.SH SYNOPSIS
+.B nvcomp-gui
+[\fIOPTIONS\fR] [\fIFILE\fR...]
+.SH DESCRIPTION
+.B nvcomp-gui
+is a GPU-accelerated compression and decompression tool with a modern Qt6 graphical user interface. It leverages NVIDIA CUDA for high-performance compression with automatic CPU fallback when GPU is unavailable.
+.PP
+Supported compression algorithms include LZ4, Zstd, Snappy (cross-compatible GPU/CPU), and GDeflate, ANS, Bitcomp (GPU-only). The application supports both single files and directories, with automatic multi-volume splitting for large datasets.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Display help message and exit
+.TP
+.B \-v, \-\-version
+Display version information and exit
+.TP
+.B \-\-compress
+Start in compression mode
+.TP
+.B \-\-decompress
+Start in decompression mode
+.TP
+.B \-\-add\-file \fIFILE\fR
+Pre-load file into the application
+.TP
+.B \-\-algorithm \fIALGO\fR
+Pre-select compression algorithm (lz4, zstd, snappy, gdeflate, ans, bitcomp)
+.TP
+.B \-\-cpu
+Force CPU mode (disable GPU acceleration)
+.TP
+.B \-\-volume\-size \fISIZE\fR
+Set volume size for multi-volume archives (e.g., 1GB, 500MB, 5GB)
+.TP
+.B \-\-no\-volumes
+Disable multi-volume splitting (create single file)
+.SH EXAMPLES
+.TP
+Launch GUI with file pre-loaded:
+.B nvcomp-gui /path/to/file.txt
+.TP
+Start in compression mode with LZ4:
+.B nvcomp-gui --compress --algorithm lz4 /path/to/data/
+.TP
+Decompress archive:
+.B nvcomp-gui --decompress archive.lz4
+.SH ALGORITHMS
+.TP
+.B LZ4
+Fast compression with good ratios. Cross-compatible GPU/CPU.
+.TP
+.B Zstd
+Best compression ratios, slower. Cross-compatible GPU/CPU.
+.TP
+.B Snappy
+Fastest compression, lower ratios. Cross-compatible GPU/CPU.
+.TP
+.B GDeflate
+GPU-optimized DEFLATE. GPU-only.
+.TP
+.B ANS
+Asymmetric Numeral Systems. GPU-only.
+.TP
+.B Bitcomp
+Lossless compression for numerical data. GPU-only.
+.SH FILES
+.TP
+.I ~/.config/nvCOMP/
+User configuration directory
+.TP
+.I ~/.local/share/applications/nvcomp.desktop
+Desktop entry file (user installation)
+.TP
+.I /usr/share/applications/nvcomp.desktop
+Desktop entry file (system installation)
+.TP
+.I /usr/share/nvcomp/
+Application data directory
+.SH ENVIRONMENT
+.TP
+.B CUDA_VISIBLE_DEVICES
+Control which CUDA devices are visible to the application
+.TP
+.B QT_QPA_PLATFORM
+Qt platform plugin to use (xcb, wayland, etc.)
+.SH REQUIREMENTS
+.TP
+.B Required
+Qt6 (6.2+), Linux kernel 3.2+, glibc 2.31+
+.TP
+.B Optional
+NVIDIA GPU with Compute Capability 7.5+, CUDA Toolkit 11.0+, NVIDIA driver 470+
+.SH SEE ALSO
+.BR nvcomp-cli (1),
+.BR lz4 (1),
+.BR zstd (1)
+.SH BUGS
+Report bugs to: https://github.com/nvcomp/nvcomp-gui/issues
+.SH AUTHOR
+nvCOMP Project <support@nvcomp.example.com>
+.SH COPYRIGHT
+Copyright \(co 2025 nvCOMP Project. License: MIT
+.br
+This is free software: you are free to change and redistribute it.
+.br
+There is NO WARRANTY, to the extent permitted by law.
+

@@ -26,6 +26,10 @@ sys.modules['gi.repository'] = MagicMock()
 sys.modules['gi.repository.Nautilus'] = MagicMock()
 sys.modules['gi.repository.GObject'] = MagicMock()
 sys.modules['gi.repository.Gio'] = MagicMock()
+# Extension base classes must be types, not MagicMock instances.
+repository = sys.modules['gi.repository']
+repository.GObject.GObject = type('GObject', (), {})
+repository.Nautilus.MenuProvider = type('MenuProvider', (), {})
 
 # Now import the extension
 import nautilus_extension
@@ -36,12 +40,9 @@ class TestNvcompMenuProvider(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures"""
-        # Create mock for GObject.GObject
-        self.mock_gobject = MagicMock()
-        nautilus_extension.GObject.GObject = self.mock_gobject
-        
         # Create provider instance
-        self.provider = nautilus_extension.NvcompMenuProvider()
+        with patch('subprocess.run', return_value=Mock(returncode=1)):
+            self.provider = nautilus_extension.NvcompMenuProvider()
     
     def test_initialization(self):
         """Test that provider initializes correctly"""
@@ -71,8 +72,7 @@ class TestNvcompMenuProvider(unittest.TestCase):
                 Mock(returncode=0),  # nvidia-smi -L
             ]
             
-            provider = nautilus_extension.NvcompMenuProvider()
-            result = provider._check_cuda_available()
+            result = self.provider._check_cuda_available()
             
             self.assertTrue(result)
     
@@ -82,8 +82,7 @@ class TestNvcompMenuProvider(unittest.TestCase):
             # Simulate nvidia-smi not found
             mock_run.return_value = Mock(returncode=1)
             
-            provider = nautilus_extension.NvcompMenuProvider()
-            result = provider._check_cuda_available()
+            result = self.provider._check_cuda_available()
             
             self.assertFalse(result)
     
@@ -166,8 +165,9 @@ class TestNvcompMenuProvider(unittest.TestCase):
         self.assertIn('/home/user/test.txt', call_args)
         self.assertIn('/home/user/data.bin', call_args)
     
+    @patch('subprocess.run')
     @patch('subprocess.Popen')
-    def test_run_nvcomp_gui_no_compress(self, mock_popen):
+    def test_run_nvcomp_gui_no_compress(self, mock_popen, mock_run):
         """Test launching nvCOMP GUI without compression"""
         self.provider.nvcomp_gui_path = '/usr/bin/nvcomp-gui'
         
@@ -274,8 +274,9 @@ class TestNautilusIntegration(unittest.TestCase):
     
     def test_provider_has_required_methods(self):
         """Test that provider implements required Nautilus methods"""
-        provider = nautilus_extension.NvcompMenuProvider()
-        
+        with patch('subprocess.run', return_value=Mock(returncode=1)):
+            provider = nautilus_extension.NvcompMenuProvider()
+
         self.assertTrue(hasattr(provider, 'get_file_items'))
         self.assertTrue(callable(provider.get_file_items))
         
@@ -293,7 +294,8 @@ class TestHelperFunctions(unittest.TestCase):
     """Test helper functions and edge cases"""
     
     def setUp(self):
-        self.provider = nautilus_extension.NvcompMenuProvider()
+        with patch('subprocess.run', return_value=Mock(returncode=1)):
+            self.provider = nautilus_extension.NvcompMenuProvider()
     
     def test_empty_file_paths(self):
         """Test handling of empty file path list"""

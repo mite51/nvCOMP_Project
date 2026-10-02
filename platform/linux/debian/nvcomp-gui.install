@@ -1,0 +1,25 @@
+# Installation files for nvcomp-gui package
+
+# Binaries (installed by CMake to debian/tmp)
+usr/bin/nvcomp_gui
+
+# Shared libraries (installed by CMake to debian/tmp/usr/lib/)
+usr/lib/libcudart.so*
+
+# Desktop integration files (from source)
+platform/linux/debian/nvcomp.desktop usr/share/applications/
+platform/linux/debian/nvcomp-mime.xml usr/share/mime/packages/
+
+# Icons are installed with explicit filenames by debian/rules.
+
+# File manager integration (from source)
+platform/linux/nautilus_extension.py usr/share/nvcomp/nautilus/
+platform/linux/nemo_script.sh usr/share/nvcomp/nemo/
+platform/linux/install_file_manager_integration.sh usr/share/nvcomp/
+
+# Documentation (from source)
+README.md usr/share/doc/nvcomp-gui/
+CHANGELOG.md usr/share/doc/nvcomp-gui/
+platform/linux/README.md usr/share/doc/nvcomp-gui/linux/
+platform/linux/FILE_MANAGER_TESTING.md usr/share/doc/nvcomp-gui/
+

@@ -1,0 +1,142 @@
+.TH NVCOMP-CLI 1 "December 2025" "nvCOMP 1.0.0" "User Commands"
+.SH NAME
+nvcomp-cli \- GPU-accelerated compression command-line tool
+.SH SYNOPSIS
+.B nvcomp-cli
+.RB [ \-c | \-d | \-l ]
+.RB [ \-a
+.IR algorithm ]
+.RI [ OPTIONS ]
+.I input
+.RI [ output ]
+.SH DESCRIPTION
+.B nvcomp-cli
+is a command-line interface for GPU-accelerated compression and decompression using NVIDIA CUDA. It supports multiple compression algorithms with automatic CPU fallback.
+.SH MODES
+.TP
+.B \-c
+Compress mode. Compress input file or directory.
+.TP
+.B \-d
+Decompress mode. Decompress archive to output directory.
+.TP
+.B \-l
+List mode. List contents of compressed archive.
+.SH OPTIONS
+.TP
+.BI \-a\  algorithm\fR,\ \fB\-\-algorithm= algorithm
+Compression algorithm to use: lz4, zstd, snappy, gdeflate, ans, bitcomp
+.TP
+.B \-\-cpu
+Force CPU mode (disable GPU acceleration)
+.TP
+.BI \-\-volume\-size\  size
+Set volume size for multi-volume archives (e.g., 1GB, 500MB, 5GB)
+.br
+Default: 2.5GB
+.TP
+.B \-\-no\-volumes
+Disable multi-volume splitting (create single file)
+.TP
+.B \-h, \-\-help
+Display help message and exit
+.TP
+.B \-v, \-\-version
+Display version information and exit
+.SH EXAMPLES
+.TP
+Compress a file with LZ4 (GPU):
+.B nvcomp-cli -c -a lz4 input.txt output.lz4
+.TP
+Compress a directory with Zstd:
+.B nvcomp-cli -c -a zstd /path/to/folder output.zstd
+.TP
+Decompress archive (auto-detect algorithm):
+.B nvcomp-cli -d archive.lz4 /path/to/output/
+.TP
+List archive contents:
+.B nvcomp-cli -l archive.zstd
+.TP
+Compress with CPU fallback:
+.B nvcomp-cli -c -a lz4 --cpu input.txt output.lz4
+.TP
+Compress with custom volume size:
+.B nvcomp-cli -c -a lz4 --volume-size 1GB large_file.bin output.lz4
+.TP
+Compress without volume splitting:
+.B nvcomp-cli -c -a lz4 --no-volumes input.txt output.lz4
+.SH ALGORITHMS
+Cross-compatible (GPU ↔ CPU):
+.TP
+.B lz4
+Fast compression with good ratios. Recommended for general use.
+.TP
+.B zstd
+Best compression ratios, slower. Best for archival.
+.TP
+.B snappy
+Fastest compression, lower ratios. Best for speed.
+.PP
+GPU-only:
+.TP
+.B gdeflate
+GPU-optimized DEFLATE implementation.
+.TP
+.B ans
+Asymmetric Numeral Systems compression.
+.TP
+.B bitcomp
+Lossless compression for numerical data.
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+General error
+.TP
+.B 2
+Invalid arguments
+.TP
+.B 3
+CUDA/GPU error
+.TP
+.B 4
+File I/O error
+.SH MULTI-VOLUME ARCHIVES
+For large files exceeding GPU memory (default 2.5GB per volume), archives are automatically split into multiple volumes:
+.PP
+.RS
+output.vol001.lz4
+.br
+output.vol002.lz4
+.br
+output.vol003.lz4
+.br
+...
+.RE
+.PP
+Decompression automatically detects and reassembles volumes.
+.SH ENVIRONMENT
+.TP
+.B CUDA_VISIBLE_DEVICES
+Control which CUDA devices are visible
+.SH FILES
+.TP
+.I /usr/bin/nvcomp-cli
+Main executable
+.TP
+.I /usr/lib/x86_64-linux-gnu/libnvcomp_core.so
+Core compression library
+.SH SEE ALSO
+.BR nvcomp-gui (1),
+.BR lz4 (1),
+.BR zstd (1),
+.BR snappy (1)
+.SH BUGS
+Report bugs to: https://github.com/nvcomp/nvcomp-gui/issues
+.SH AUTHOR
+nvCOMP Project <support@nvcomp.example.com>
+.SH COPYRIGHT
+Copyright \(co 2025 nvCOMP Project. License: MIT
+

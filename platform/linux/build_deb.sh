@@ -10,7 +10,7 @@
 #   --install-deps Install build dependencies
 #   --help         Show this help message
 
-set -e  # Exit on error
+set -euo pipefail  # Preserve failures from debuild when logging through tee
 
 # Colors for output
 RED='\033[0;31m'
@@ -89,12 +89,6 @@ if [ $INSTALL_DEPS -eq 1 ]; then
         lintian \
         fakeroot
     
-    # Optional CUDA (recommended)
-    if ! dpkg -l | grep -q nvidia-cuda-toolkit; then
-        echo -e "${YELLOW}CUDA Toolkit not installed. GPU support will be disabled.${NC}"
-        echo -e "${YELLOW}To enable GPU support, install: sudo apt-get install nvidia-cuda-toolkit${NC}"
-    fi
-    
     echo -e "${GREEN}✓ Dependencies installed${NC}"
 fi
 
@@ -124,11 +118,11 @@ else
     echo -e "${YELLOW}⚠ g++-12 not found. Install with: sudo apt-get install g++-12${NC}"
 fi
 
-# Check CUDA availability
-if command -v nvcc &> /dev/null || [ -d /usr/local/cuda ]; then
-    echo -e "${GREEN}✓ CUDA detected (GPU support enabled)${NC}"
-else
-    echo -e "${YELLOW}⚠ CUDA not detected (CPU-only build)${NC}"
+# The SDK is built for CUDA 13; CPU fallback is a runtime feature.
+export CUDACXX="${CUDACXX:-/usr/local/cuda-13/bin/nvcc}"
+if [[ ! -x "$CUDACXX" ]] || ! "$CUDACXX" --version | grep -q 'release 13\.'; then
+    echo "CUDA Toolkit 13.x is required. Set CUDACXX to its nvcc executable."
+    exit 1
 fi
 
 # Clean if requested
@@ -201,7 +195,7 @@ fi
 
 # Run debuild
 echo -e "\n${YELLOW}Running debuild...${NC}"
-if debuild $BUILD_OPTS -b 2>&1 | tee build.log; then
+if debuild -eCUDACXX $BUILD_OPTS -b 2>&1 | tee build.log; then
     echo -e "\n${GREEN}✓ Package build successful!${NC}"
 else
     echo -e "\n${RED}✗ Package build failed!${NC}"
@@ -215,8 +209,8 @@ PACKAGE_DIR="$PROJECT_ROOT/platform/linux/packaged"
 mkdir -p "$PACKAGE_DIR"
 
 # Move all package files
-if ls ../*.deb ../*.ddeb ../*.buildinfo ../*.changes 1> /dev/null 2>&1; then
-    mv ../*.deb ../*.ddeb ../*.buildinfo ../*.changes "$PACKAGE_DIR/" 2>/dev/null || true
+if ls ../nvcomp-*.deb ../nvcomp-*.ddeb ../nvcomp-*.buildinfo ../nvcomp-*.changes 1> /dev/null 2>&1; then
+    mv ../nvcomp-*.deb ../nvcomp-*.ddeb ../nvcomp-*.buildinfo ../nvcomp-*.changes "$PACKAGE_DIR/" 2>/dev/null || true
     echo -e "${GREEN}✓ Packages moved to platform/linux/packaged/${NC}"
 fi
 

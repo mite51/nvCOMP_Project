@@ -1,0 +1,30 @@
+# Build artifacts that are intentionally not installed in any package
+
+# Static libraries from build dependencies (not needed in runtime packages)
+usr/lib/*/libsnappy.a
+usr/lib/*/libzstd.a
+usr/lib/liblinux_desktop_integration.a
+
+# CMake config files from build dependencies (not needed)
+usr/lib/*/cmake/Snappy/*
+usr/lib/*/cmake/zstd/*
+usr/lib/cmake/nvcomp_core/*
+usr/lib/*/pkgconfig/libzstd.pc
+
+# Headers from build dependencies (not needed)
+usr/include/snappy*.h
+usr/include/zdict.h
+usr/include/zstd*.h
+
+# Headers installed by CMake (we use source versions in nvcomp-dev)
+usr/include/nvcomp_c_api.h
+usr/include/nvcomp_core.hpp
+
+# Files already installed via .install files from source
+# (CMake also installed them, but we use source versions)
+usr/share/doc/nvcomp/linux/FILE_MANAGER_TESTING.md
+usr/share/doc/nvcomp/linux/README.md
+usr/share/nvcomp/install_file_manager_integration.sh
+usr/share/nvcomp/nautilus/nautilus_extension.py
+usr/share/nvcomp/nemo/nemo_script.sh
+

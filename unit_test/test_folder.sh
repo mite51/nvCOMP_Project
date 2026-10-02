@@ -17,8 +17,8 @@ FAIL_COUNT=0
 mkdir -p output
 
 # Find executable
-EXE="../build/nvcomp_cli"
-if [ ! -f "$EXE" ]; then
+EXE="${EXE:-../build/nvcomp_cli}"
+if [ ! -f "$EXE" ] && [ "$EXE" = "../build/nvcomp_cli" ]; then
     EXE="../build/Release/nvcomp_cli"
 fi
 if [ ! -f "$EXE" ]; then
@@ -45,7 +45,7 @@ run_folder_test() {
     
     # Compress folder
     echo "  Compressing folder..."
-    if ! $EXE -c sample_folder output/folder.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -c sample_folder output/folder.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Folder compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -53,7 +53,7 @@ run_folder_test() {
     
     # List archive
     echo "  Listing archive..."
-    if ! $EXE -l output/folder.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -l output/folder.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Archive listing failed"
         ((FAIL_COUNT++))
         return 1
@@ -62,7 +62,7 @@ run_folder_test() {
     # Decompress folder
     echo "  Decompressing folder..."
     rm -rf output/folder_restored_$ALGO
-    if ! $EXE -d output/folder.$ALGO output/folder_restored_$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -d output/folder.$ALGO output/folder_restored_$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Folder decompression failed"
         ((FAIL_COUNT++))
         return 1
@@ -94,7 +94,7 @@ run_list_test() {
     
     # Compress folder
     echo "  Compressing folder for listing test..."
-    if ! $EXE -c sample_folder output/list_test.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -c sample_folder output/list_test.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -102,7 +102,7 @@ run_list_test() {
     
     # List archive
     echo "  Listing archive contents..."
-    if ! $EXE -l output/list_test.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -l output/list_test.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Archive listing failed"
         ((FAIL_COUNT++))
         return 1
@@ -129,7 +129,7 @@ run_roundtrip_test() {
     
     # Step 1: Compress with GPU
     echo "  Step 1: Compressing folder with GPU..."
-    if ! $EXE -c sample_folder output/roundtrip.$ALGO $ALGO; then
+    if ! "$EXE" -c sample_folder output/roundtrip.$ALGO $ALGO; then
         echo "  FAILED: GPU Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -137,7 +137,7 @@ run_roundtrip_test() {
     
     # Step 2: List (this was failing before)
     echo "  Step 2: Listing archive (this was failing before)..."
-    if ! $EXE -l output/roundtrip.$ALGO $ALGO; then
+    if ! "$EXE" -l output/roundtrip.$ALGO $ALGO; then
         echo "  FAILED: Archive listing failed - ORIGINAL ISSUE REPRODUCED!"
         echo "  This is the error that was reported."
         ((FAIL_COUNT++))
@@ -147,7 +147,7 @@ run_roundtrip_test() {
     # Step 3: Decompress (this was also failing)
     echo "  Step 3: Decompressing (this was also failing)..."
     rm -rf output/roundtrip_restored
-    if ! $EXE -d output/roundtrip.$ALGO output/roundtrip_restored $ALGO; then
+    if ! "$EXE" -d output/roundtrip.$ALGO output/roundtrip_restored $ALGO; then
         echo "  FAILED: Decompression failed - ORIGINAL ISSUE REPRODUCED!"
         echo "  This is the error that was reported."
         ((FAIL_COUNT++))
@@ -181,7 +181,7 @@ run_autodetect_list_test() {
     
     # Compress folder
     echo "  Compressing folder..."
-    if ! $EXE -c sample_folder output/autodetect.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -c sample_folder output/autodetect.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -189,7 +189,7 @@ run_autodetect_list_test() {
     
     # List archive WITHOUT algorithm parameter
     echo "  Listing archive WITHOUT algorithm parameter..."
-    if ! $EXE -l output/autodetect.$ALGO $FLAGS; then
+    if ! "$EXE" -l output/autodetect.$ALGO $FLAGS; then
         echo "  FAILED: Auto-detection listing failed"
         ((FAIL_COUNT++))
         return 1
@@ -213,7 +213,7 @@ run_autodetect_decompress_test() {
     
     # Compress folder
     echo "  Compressing folder..."
-    if ! $EXE -c sample_folder output/autodetect.$ALGO $ALGO $FLAGS; then
+    if ! "$EXE" -c sample_folder output/autodetect.$ALGO $ALGO $FLAGS; then
         echo "  FAILED: Compression failed"
         ((FAIL_COUNT++))
         return 1
@@ -222,7 +222,7 @@ run_autodetect_decompress_test() {
     # Decompress WITHOUT algorithm parameter
     echo "  Decompressing WITHOUT algorithm parameter..."
     rm -rf output/autodetect_restored
-    if ! $EXE -d output/autodetect.$ALGO output/autodetect_restored $FLAGS; then
+    if ! "$EXE" -d output/autodetect.$ALGO output/autodetect_restored $FLAGS; then
         echo "  FAILED: Auto-detection decompression failed"
         ((FAIL_COUNT++))
         return 1

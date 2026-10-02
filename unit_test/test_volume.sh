@@ -14,7 +14,7 @@ FAIL_COUNT=0
 # Create output directory
 mkdir -p output
 
-EXE="../build/nvcomp_cli"
+EXE="${EXE:-../build/nvcomp_cli}"
 if [ ! -f "$EXE" ]; then
     echo "ERROR: nvcomp_cli not found. Build the project first."
     exit 1
@@ -44,7 +44,7 @@ run_volume_test() {
     # Clean up old volume files
     rm -f output/volume_test_*.vol*.$ALGO 2>/dev/null
     
-    $EXE -c sample_folder output/volume_test_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE $FLAGS
+    "$EXE" -c sample_folder output/volume_test_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE $FLAGS
     if [ $? -ne 0 ]; then
         echo "  FAILED: Volume compression failed"
         ((FAIL_COUNT++))
@@ -71,7 +71,7 @@ run_volume_test() {
     
     echo "  Decompressing multi-volume archive..."
     rm -rf output/volume_restored_$ALGO
-    $EXE -d output/volume_test_$ALGO.vol001.$ALGO output/volume_restored_$ALGO $FLAGS
+    "$EXE" -d output/volume_test_$ALGO.vol001.$ALGO output/volume_restored_$ALGO $FLAGS
     if [ $? -ne 0 ]; then
         echo "  FAILED: Volume decompression failed"
         ((FAIL_COUNT++))
@@ -103,7 +103,7 @@ run_single_volume_test() {
     # Clean up old files
     rm -f output/single_test_$ALGO.* 2>/dev/null
     
-    $EXE -c sample_folder output/single_test_$ALGO.$ALGO $ALGO $VOL_FLAG $FLAGS_BASE
+    "$EXE" -c sample_folder output/single_test_$ALGO.$ALGO $ALGO $VOL_FLAG $FLAGS_BASE
     if [ $? -ne 0 ]; then
         echo "  FAILED: Single volume compression failed"
         ((FAIL_COUNT++))
@@ -125,7 +125,7 @@ run_single_volume_test() {
     
     echo "  Decompressing single file..."
     rm -rf output/single_restored_$ALGO
-    $EXE -d output/single_test_$ALGO.$ALGO output/single_restored_$ALGO $FLAGS_BASE
+    "$EXE" -d output/single_test_$ALGO.$ALGO output/single_restored_$ALGO $FLAGS_BASE
     if [ $? -ne 0 ]; then
         echo "  FAILED: Single file decompression failed"
         ((FAIL_COUNT++))
@@ -156,7 +156,7 @@ run_volume_list_test() {
     # Clean up old volume files
     rm -f output/list_vol_test_*.vol*.$ALGO 2>/dev/null
     
-    $EXE -c sample_folder output/list_vol_test_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
+    "$EXE" -c sample_folder output/list_vol_test_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
     if [ $? -ne 0 ]; then
         echo "  FAILED: Volume compression failed"
         ((FAIL_COUNT++))
@@ -164,7 +164,7 @@ run_volume_list_test() {
     fi
     
     echo "  Listing multi-volume archive..."
-    $EXE -l output/list_vol_test_$ALGO.vol001.$ALGO
+    "$EXE" -l output/list_vol_test_$ALGO.vol001.$ALGO
     if [ $? -ne 0 ]; then
         echo "  FAILED: Volume listing failed"
         ((FAIL_COUNT++))
@@ -188,7 +188,7 @@ run_volume_autodetect_test() {
     # Clean up old volume files
     rm -f output/autodetect_vol_*.vol*.$ALGO 2>/dev/null
     
-    $EXE -c sample_folder output/autodetect_vol_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
+    "$EXE" -c sample_folder output/autodetect_vol_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
     if [ $? -ne 0 ]; then
         echo "  FAILED: Volume compression failed"
         ((FAIL_COUNT++))
@@ -197,7 +197,7 @@ run_volume_autodetect_test() {
     
     echo "  Decompressing WITHOUT algorithm parameter (auto-detect)..."
     rm -rf output/autodetect_vol_restored_$ALGO
-    $EXE -d output/autodetect_vol_$ALGO.vol001.$ALGO output/autodetect_vol_restored_$ALGO
+    "$EXE" -d output/autodetect_vol_$ALGO.vol001.$ALGO output/autodetect_vol_restored_$ALGO
     if [ $? -ne 0 ]; then
         echo "  FAILED: Auto-detection decompression failed"
         ((FAIL_COUNT++))
@@ -228,7 +228,7 @@ run_custom_size_test() {
     # Clean up old volume files
     rm -f output/custom_vol_*.vol*.$ALGO 2>/dev/null
     
-    $EXE -c sample_folder output/custom_vol_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
+    "$EXE" -c sample_folder output/custom_vol_$ALGO.$ALGO $ALGO --volume-size $VOL_SIZE
     if [ $? -ne 0 ]; then
         echo "  FAILED: Custom size compression failed"
         ((FAIL_COUNT++))
@@ -237,7 +237,7 @@ run_custom_size_test() {
     
     echo "  Decompressing custom-sized volumes..."
     rm -rf output/custom_vol_restored_$ALGO
-    $EXE -d output/custom_vol_$ALGO.vol001.$ALGO output/custom_vol_restored_$ALGO
+    "$EXE" -d output/custom_vol_$ALGO.vol001.$ALGO output/custom_vol_restored_$ALGO
     if [ $? -ne 0 ]; then
         echo "  FAILED: Custom size decompression failed"
         ((FAIL_COUNT++))

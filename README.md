@@ -175,7 +175,7 @@ Use a new work directory for each baseline. The harness keeps archives, extracti
 results, process logs and timing/failure JSON files. It checks all six algorithms,
 CPU/GPU interoperability, chunk boundaries, empty files, multiple volumes, file
 contents and modification times. Process failures produce a nonzero exit even
-when the extracted contents match. The Windows batch suites also accept an `EXE`
+when the extracted contents match. The Windows batch suites and Linux shell suites accept an `EXE`
 environment variable to select a CLI from a separate build directory.
 
 **5.3 upgrade validation (2026-09-30):** Windows, RTX 4090, driver 591.86,
@@ -196,8 +196,65 @@ CUDA Toolkit 13.0.88, MSVC 19.38, Qt 6.8.0, Release configuration.
   times differed by about 3% or less; peak host memory was comparable. These are
   local end-to-end measurements, not general throughput guarantees. Peak VRAM
   was not measured.
-- Linux compilation, packaging and POSIX metadata checks remain unverified here:
-  the available Ubuntu environment lacks a C++ compiler and CUDA Toolkit.
+
+**Linux 5.3 upgrade validation (2026-09-30):** Ubuntu 24.04.5 x86_64,
+RTX 5090, driver 580.173.02, CUDA Toolkit 13.0.88, GCC 12.4.0, Qt 6.4.2,
+Release build of commit `f8a1363` with Linux packaging, settings and test fixes.
+
+- Fresh CLI, core library, GUI and test builds succeeded. The C API test verified
+  the loaded nvCOMP runtime is 5.3.0, built for CUDA 13.
+- 20 C API checks, 48 headless GUI checks and 28 Nautilus checks passed with no
+  skips. The GUI sample check now uses the repository fixture. GUI tests use a
+  temporary settings/data profile and verify that opening settings, reloading
+  preferences, restoring defaults and cancelling integration removal preserve
+  an existing launcher without installing anything.
+- 38 CLI/folder/volume checks, 6 archive-listing checks, 6 POSIX permissions/mtime
+  checks and 13 pre-optimization archive-fixture checks passed on the GPU.
+- The preserved 5.1.0.21 build passed 30 baseline checks. All 90 candidate and
+  cross-version content/mtime checks passed across all six codecs, including
+  CPU/GPU interoperability and multiple volumes. All 180 CLI processes across
+  both phases exited successfully; no old-reader crashes occurred in this run.
+- With GPU devices unavailable, LZ4/Snappy/Zstd automatically fell back to CPU
+  and restored byte-identical files; GDeflate/ANS/Bitcomp returned GPU-only errors.
+  CTest also passed without a GPU, with GPU-specific C API bodies skipped, and
+  the headless GUI remained running through a three-second startup smoke test.
+- Corrected Debian packages (`1.0.0-2`) bundle the pinned nvCOMP libraries and
+  CUDA runtime with their license notices. The GUI depends on the matching CLI
+  package instead of duplicating shared files. Both extracted applications now
+  resolve their runtime libraries from the package; the bundled nvCOMP binary
+  matches the SDK SHA-256. Six GPU codec round-trips, three automatic CPU
+  fallback round-trips, and GUI startup checks passed using the extracted
+  packages with no SDK library-path override. No system packages were installed.
+- Debian packaging sources are no longer ignored by Git. The build requires
+  CUDA 13, propagates build failures, and installs correctly named launcher and
+  icon files. Package maintenance leaves user profiles and file managers alone.
+- Fixed settings initialization and checkbox rollback so they do not trigger
+  installation/removal dialogs or rewrite desktop launchers. Corrected the
+  Nautilus test base-class mocks and isolated hardware/notification calls.
+
+Reproduce the Linux build and headless tests with a fresh build directory
+(select CUDA 13 explicitly if the default `nvcc` still resolves to CUDA 12):
+
+```bash
+cmake -S . -B out/linux-nvcomp53 \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.0/bin/nvcc \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_CLI=ON -DBUILD_GUI=ON -DBUILD_TESTS=ON
+cmake --build out/linux-nvcomp53 --parallel 8
+QT_QPA_PLATFORM=offscreen \
+  XDG_CONFIG_HOME="$PWD/output/linux-nvcomp53/qt-config-isolated" \
+  XDG_DATA_HOME="$PWD/output/linux-nvcomp53/qt-data" \
+  ctest --test-dir out/linux-nvcomp53 --output-on-failure --timeout 60
+export EXE="$PWD/out/linux-nvcomp53/nvcomp_cli"
+(cd unit_test && for suite in test.sh test_folder.sh test_volume.sh test_list.sh \
+  test_metadata.sh test_fixtures.sh; do bash "$suite" || exit; done)
+```
+
+Run GPU suites where NVIDIA device access is available; successful automatic
+CPU fallback does not constitute GPU coverage. The legacy-fixture suite requires
+`bench/fixtures/`. Generated test outputs, logs and temporary builds were removed
+following validation. The original `build/`, `build_gui/` and source fixtures
+were preserved. Corrected Debian packages are available locally in
+`out/packages/`; install the CLI and GUI packages together when using the GUI.
 
 For a repeatable comparison on real data, use the
 [Silesia corpus benchmark](bench/SILESIA.md). It tests all six algorithms on 12
