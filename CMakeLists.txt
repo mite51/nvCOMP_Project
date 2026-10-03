@@ -560,7 +560,7 @@ endif()
 # Install core library (always)
 # Core library installation is handled in core/CMakeLists.txt
 
-# Install nvCOMP SDK DLLs/shared libraries on Windows
+# Install the SDK runtime alongside the application on both platforms.
 if(WIN32)
     install(FILES
         "${NVCOMP_PATH}/bin/nvcomp64_5.dll"
@@ -568,10 +568,24 @@ if(WIN32)
         DESTINATION bin
         COMPONENT runtime
     )
+elseif(UNIX AND NOT APPLE)
+    # Include the full symlink chains: the imported SDK targets point at the
+    # unversioned links, while their SONAME links point at versioned binaries.
+    file(GLOB NVCOMP_RUNTIME_FILES
+        "${NVCOMP_PATH}/lib/libnvcomp.so*"
+        "${NVCOMP_PATH}/lib/libnvcomp_cpu.so*")
+    install(FILES ${NVCOMP_RUNTIME_FILES} DESTINATION lib COMPONENT runtime)
+    if(BUILD_GUI)
+        get_target_property(CUDART_LOCATION CUDA::cudart IMPORTED_LOCATION)
+        get_filename_component(CUDART_DIRECTORY "${CUDART_LOCATION}" DIRECTORY)
+        file(GLOB CUDART_RUNTIME_FILES "${CUDART_DIRECTORY}/libcudart.so*")
+        install(FILES ${CUDART_RUNTIME_FILES} DESTINATION lib COMPONENT gui)
+        install(FILES "${CUDAToolkit_LIBRARY_ROOT}/EULA.txt"
+            DESTINATION share/doc/nvcomp RENAME CUDA-EULA.txt COMPONENT runtime)
+    endif()
+    install(FILES "${NVCOMP_PATH}/LICENSE" "${NVCOMP_PATH}/NOTICE"
+        DESTINATION share/doc/nvcomp COMPONENT runtime)
 endif()
-
-# Linux: nvCOMP .so files should be in a known location or use RPATH
-# The RPATH is configured per-target above
 
 # Set installation directories
 include(GNUInstallDirs)

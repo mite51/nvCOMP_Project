@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QSignalBlocker>
 
 #ifdef Q_OS_LINUX
 #include "desktop_integration.h"
@@ -25,7 +26,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 {
     ui->setupUi(this);
     setupUi();
-    setupConnections();
     loadSettings();
     
 #ifdef Q_OS_LINUX
@@ -43,6 +43,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     ui->checkBoxEnableFileAssociations->setVisible(false);
     ui->checkBoxStartWithSystem->setVisible(false);
 #endif
+    setupConnections();
 }
 
 SettingsDialog::~SettingsDialog()
@@ -108,6 +109,8 @@ void SettingsDialog::setupConnections()
 
 void SettingsDialog::loadSettings()
 {
+    // Loading preferences must not install or remove desktop integration.
+    const QSignalBlocker integrationSignals(ui->checkBoxEnableContextMenu);
     // Tab 1: Compression
     QString algorithm = m_settings.value("compression/defaultAlgorithm", "LZ4").toString();
     int algorithmIndex = ui->comboBoxDefaultAlgorithm->findData(algorithm);
@@ -162,8 +165,12 @@ void SettingsDialog::loadSettings()
         m_settings.value("interface/showStatistics", true).toBool());
     
     // Tab 4: Integration
-    ui->checkBoxEnableContextMenu->setChecked(
-        m_settings.value("integration/enableContextMenu", false).toBool());
+    bool integrationEnabled = m_settings.value("integration/enableContextMenu", false).toBool();
+#ifdef Q_OS_LINUX
+    if (m_desktopIntegration)
+        integrationEnabled = m_desktopIntegration->isInstalled();
+#endif
+    ui->checkBoxEnableContextMenu->setChecked(integrationEnabled);
     
     ui->checkBoxEnableFileAssociations->setChecked(
         m_settings.value("integration/enableFileAssociations", false).toBool());
@@ -219,6 +226,7 @@ void SettingsDialog::saveSettings()
 
 void SettingsDialog::restoreDefaults()
 {
+    const QSignalBlocker integrationSignals(ui->checkBoxEnableContextMenu);
     // Tab 1: Compression
     ui->comboBoxDefaultAlgorithm->setCurrentIndex(0);  // LZ4
     ui->spinBoxDefaultVolumeSize->setValue(2560);  // 2.5 GB
@@ -238,8 +246,13 @@ void SettingsDialog::restoreDefaults()
     ui->checkBoxConfirmOverwrite->setChecked(true);
     ui->checkBoxShowStatistics->setChecked(true);
     
-    // Tab 4: Integration
-    ui->checkBoxEnableContextMenu->setChecked(false);
+    // Restoring preferences does not uninstall the existing Linux integration.
+    bool integrationEnabled = false;
+#ifdef Q_OS_LINUX
+    if (m_desktopIntegration)
+        integrationEnabled = m_desktopIntegration->isInstalled();
+#endif
+    ui->checkBoxEnableContextMenu->setChecked(integrationEnabled);
     ui->checkBoxEnableFileAssociations->setChecked(false);
     ui->checkBoxStartWithSystem->setChecked(false);
 }
@@ -455,6 +468,9 @@ void SettingsDialog::onLinuxDesktopIntegrationToggled(bool checked)
     if (!m_desktopIntegration) {
         return;
     }
+    // Resetting the checkbox after cancellation/failure must not trigger a
+    // second install/uninstall operation or another confirmation dialog.
+    const QSignalBlocker integrationSignals(ui->checkBoxEnableContextMenu);
     
     if (checked) {
         // Install desktop integration
@@ -495,4 +511,3 @@ void SettingsDialog::onLinuxDesktopIntegrationToggled(bool checked)
     }
 }
 #endif
-

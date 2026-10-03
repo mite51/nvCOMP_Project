@@ -1,0 +1,6 @@
+#!/bin/sh
+# Desktop/MIME/icon caches are handled by debhelper triggers. The Nautilus
+# extension is package-owned; preserve user profiles and running file managers.
+set -e
+#DEBHELPER#
+exit 0

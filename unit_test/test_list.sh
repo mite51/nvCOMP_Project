@@ -14,7 +14,7 @@ FAIL_COUNT=0
 
 mkdir -p output
 
-EXE="../build/nvcomp_cli"
+EXE="${EXE:-../build/nvcomp_cli}"
 if [ ! -f "$EXE" ]; then
     echo "ERROR: nvcomp_cli not found. Build the project first."
     exit 1
@@ -56,7 +56,7 @@ check_listing() {
     echo "[Test $TEST_COUNT] $TEST_NAME"
 
     local OUT
-    OUT=$($EXE -l "$ARCHIVE" $EXTRA_FLAGS 2>&1)
+    OUT=$("$EXE" -l "$ARCHIVE" $EXTRA_FLAGS 2>&1)
     if [ $? -ne 0 ]; then
         echo "  FAILED: -l exited nonzero"
         echo "$OUT" | head -5
@@ -102,7 +102,7 @@ check_listing() {
 # Single-file archives, one per cross-compatible algorithm
 for ALGO in lz4 zstd snappy; do
     rm -f "output/list_single.$ALGO"
-    $EXE -c "$SRC" "output/list_single.$ALGO" $ALGO --no-volumes > /dev/null || {
+    "$EXE" -c "$SRC" "output/list_single.$ALGO" $ALGO --no-volumes > /dev/null || {
         echo "ERROR: compression failed ($ALGO)"; exit 1; }
     check_listing "Single-file listing ($ALGO)" "output/list_single.$ALGO"
 done
@@ -112,7 +112,7 @@ check_listing "Single-file listing (lz4, --cpu)" "output/list_single.lz4" "--cpu
 
 # Multi-volume archive (small volumes => several)
 rm -f output/list_mv.vol*.lz4
-$EXE -c "$SRC" "output/list_mv.lz4" lz4 --volume-size 100KB > /dev/null || {
+"$EXE" -c "$SRC" "output/list_mv.lz4" lz4 --volume-size 100KB > /dev/null || {
     echo "ERROR: multi-volume compression failed"; exit 1; }
 VOLS=$(ls output/list_mv.vol*.lz4 2>/dev/null | wc -l)
 if [ "$VOLS" -lt 2 ]; then

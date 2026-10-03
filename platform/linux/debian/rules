@@ -1,0 +1,91 @@
+#!/usr/bin/make -f
+# -*- makefile -*-
+
+# Debian package build rules for nvCOMP
+# This file controls how the package is built and installed
+
+# Output every command that modifies files on the build system.
+export DH_VERBOSE = 1
+
+# Use GCC-12 for CUDA compatibility (Ubuntu 24.04 fix)
+export CC = gcc-12
+export CXX = g++-12
+export CUDAHOSTCXX = g++-12
+
+# Enable hardening flags but disable LTO (causes GCC-12 crash on zstd legacy code)
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all optimize=-lto
+
+# Get architecture info
+DEB_HOST_MULTIARCH ?= $(shell dpkg-architecture -qDEB_HOST_MULTIARCH)
+
+# CMake flags
+CMAKE_FLAGS = \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_INSTALL_PREFIX=/usr \
+	-DCMAKE_INSTALL_LIBDIR=lib/$(DEB_HOST_MULTIARCH) \
+	-DBUILD_CLI=ON \
+	-DBUILD_GUI=ON \
+	-DBUILD_TESTS=ON \
+	-DCMAKE_SKIP_RPATH=OFF \
+	-DCMAKE_INSTALL_RPATH=/usr/lib/$(DEB_HOST_MULTIARCH)
+
+# Prefer the CUDA 13 toolkit; honor an explicit CUDACXX selection.
+export CUDACXX ?= /usr/local/cuda-13/bin/nvcc
+CMAKE_FLAGS += -DCMAKE_CUDA_COMPILER=$(CUDACXX)
+
+%:
+	dh $@ --buildsystem=cmake
+
+override_dh_auto_configure:
+	# Try with GCC-12 first, fallback to default if not available
+	# Note: We allow FetchContent to download dependencies during build
+	# This is not ideal for Debian but necessary until dependencies are pre-packaged
+	if command -v g++-12 >/dev/null 2>&1; then \
+		DEB_BUILD_OPTIONS="$(DEB_BUILD_OPTIONS) nocheck" \
+		dh_auto_configure -- $(CMAKE_FLAGS) -DFETCHCONTENT_FULLY_DISCONNECTED=OFF; \
+	else \
+		unset CC CXX CUDAHOSTCXX; \
+		DEB_BUILD_OPTIONS="$(DEB_BUILD_OPTIONS) nocheck" \
+		dh_auto_configure -- $(CMAKE_FLAGS) -DFETCHCONTENT_FULLY_DISCONNECTED=OFF; \
+	fi
+
+override_dh_auto_build:
+	dh_auto_build
+	# Build is handled by CMake
+
+override_dh_auto_install:
+	dh_auto_install
+	# CMake installs binaries and libraries to debian/tmp/
+	# dh_install will move them to package-specific directories
+
+override_dh_install:
+	dh_install
+	install -Dm644 platform/linux/nautilus_extension.py debian/nvcomp-gui/usr/share/nautilus-python/extensions/nvcomp_extension.py
+	for size in 16 32 48 64 128 256; do \
+		install -Dm644 gui/resources/nvcomp_$$size.png debian/nvcomp-gui/usr/share/icons/hicolor/$${size}x$${size}/apps/nvcomp.png; \
+	done
+	for codec in lz4 zstd snappy; do \
+		install -Dm644 gui/resources/nvcomp_$${codec}_48.png debian/nvcomp-gui/usr/share/icons/hicolor/48x48/mimetypes/application-x-$$codec.png; \
+	done
+
+override_dh_auto_test:
+	# Skip tests during package build (they require test data and X display)
+	@echo "Skipping tests during package build"
+
+override_dh_shlibdeps:
+	# Bundled vendor libraries have no distro shlibs metadata. Resolve from
+	# package staging, never an SDK from another build.
+	dh_shlibdeps -l$(CURDIR)/debian/nvcomp-cli/usr/lib:$(CURDIR)/debian/nvcomp-gui/usr/lib -- \
+		--ignore-missing-info
+
+# Preserve the vendor runtime binaries (and their SDK checksums).
+override_dh_strip:
+	dh_strip --automatic-dbgsym -Xlibnvcomp.so -Xlibnvcomp_cpu.so -Xlibcudart.so
+
+
+override_dh_builddeb:
+	dh_builddeb -- -Zxz -z9
+
+# No parallel builds for CUDA compilation stability
+.NOTPARALLEL:
+

@@ -1,0 +1,15 @@
+# Installation files for nvcomp-cli package (CLI only, no GUI dependencies)
+
+# Binary (installed by CMake to debian/tmp)
+usr/bin/nvcomp_cli
+
+# Shared library (installed by CMake to debian/tmp/usr/lib/)
+usr/lib/libnvcomp_core.so
+usr/lib/libnvcomp.so*
+usr/lib/libnvcomp_cpu.so*
+usr/share/doc/nvcomp/*
+
+# Documentation (from source)
+README.md usr/share/doc/nvcomp-cli/
+CHANGELOG.md usr/share/doc/nvcomp-cli/
+

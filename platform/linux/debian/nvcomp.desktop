@@ -1,0 +1,24 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=nvCOMP
+GenericName=GPU-Accelerated Compression
+Comment=Compress and decompress files using NVIDIA GPU acceleration
+Exec=nvcomp_gui --add-file %f
+Icon=nvcomp
+Terminal=false
+Categories=Utility;Archiving;Compression;Qt;
+MimeType=application/x-lz4;application/x-zstd;application/x-snappy;application/x-nvcomp;application/x-gdeflate;application/x-ans;application/x-bitcomp;
+Keywords=compress;decompress;archive;lz4;zstd;snappy;gdeflate;gpu;cuda;nvidia;compression;
+StartupNotify=true
+StartupWMClass=nvcomp_gui
+Actions=Compress;Decompress;
+
+[Desktop Action Compress]
+Name=Compress Files
+Exec=nvcomp_gui --compress
+
+[Desktop Action Decompress]
+Name=Decompress Archive
+Exec=nvcomp_gui --decompress
+

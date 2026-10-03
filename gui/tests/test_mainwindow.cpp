@@ -27,6 +27,11 @@
 #include <QDialogButtonBox>
 #include <QRadioButton>
 #include <QSlider>
+#include <QTemporaryDir>
+#include <QStandardPaths>
+#include <QSettings>
+#include <QMessageBox>
+#include <QTimer>
 #include "mainwindow.h"
 #include "archive_viewer.h"
 #include "settings_dialog.h"
@@ -249,6 +254,7 @@ private slots:
      * @brief Test: Settings Dialog can be created
      */
     void testSettingsDialogConstruction();
+    void testSettingsPreserveDesktopIntegration();
     
     /**
      * @brief Test: Settings Dialog has correct UI elements
@@ -885,16 +891,10 @@ void TestMainWindow::testArchiveViewerUI()
 
 void TestMainWindow::testArchiveViewerLoadSample()
 {
-    // Test with the sample archive provided by user
-    QString samplePath = "C:/Git/nvCOMP_CLI/unit_test/sample_archive.nvcomp";
-    
-    // Check if sample file exists
+    const QString samplePath = QFINDTESTDATA("../../unit_test/sample_folder.nvcomp");
+    QVERIFY2(!samplePath.isEmpty(), "Repository sample archive is missing");
     QFileInfo fileInfo(samplePath);
-    if (!fileInfo.exists()) {
-        QSKIP("Sample archive not found at C:/Git/nvCOMP_CLI/unit_test/sample_archive.nvcomp");
-        return;
-    }
-    
+
     // Verify the file is valid without creating the dialog
     // (Creating the dialog may show blocking error dialogs for compressed archives)
     QVERIFY(fileInfo.exists());
@@ -1004,6 +1004,50 @@ void TestMainWindow::testSettingsDialogConstruction()
     QVERIFY(dialog->isModal());
     QCOMPARE(dialog->windowTitle(), QString("Settings"));
     delete dialog;
+}
+
+void TestMainWindow::testSettingsPreserveDesktopIntegration()
+{
+#ifdef Q_OS_LINUX
+    // A pre-existing launcher must survive construction, preference reload,
+    // and Restore Defaults without invoking installation or showing dialogs.
+    const QString applications = QStandardPaths::writableLocation(
+        QStandardPaths::GenericDataLocation) + "/applications";
+    QVERIFY(QDir().mkpath(applications));
+    const QString launcherPath = applications + "/nvcomp.desktop";
+    const QByteArray original("[Desktop Entry]\nExec=/test/existing-nvcomp\n");
+    QFile launcher(launcherPath);
+    QVERIFY(launcher.open(QIODevice::WriteOnly));
+    QCOMPARE(launcher.write(original), qint64(original.size()));
+    launcher.close();
+
+    QSettings settings("nvCOMP", "nvCOMP GUI");
+    settings.setValue("integration/enableContextMenu", false);
+    settings.sync();
+    SettingsDialog dialog(window);
+    auto *toggle = dialog.findChild<QCheckBox*>("checkBoxEnableContextMenu");
+    QVERIFY(toggle);
+    QVERIFY(toggle->isChecked());
+    dialog.loadSettings();
+    QVERIFY(toggle->isChecked());
+    dialog.restoreDefaults();
+    QVERIFY(toggle->isChecked());
+
+    // Cancelling removal must not reinstall the application or show a second
+    // dialog when the checkbox is restored to its checked state.
+    QTimer::singleShot(0, [] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *message = qobject_cast<QMessageBox*>(widget))
+                message->button(QMessageBox::No)->click();
+        }
+    });
+    toggle->click();
+    QVERIFY(toggle->isChecked());
+    QVERIFY(launcher.open(QIODevice::ReadOnly));
+    QCOMPARE(launcher.readAll(), original);
+    launcher.close();
+    QVERIFY(QFile::remove(launcherPath));
+#endif
 }
 
 void TestMainWindow::testSettingsDialogUI()
@@ -1197,6 +1241,14 @@ int main(int argc, char *argv[])
 {
     // Create QApplication for GUI testing
     // Use QApplication::setSetuidAllowed(true) if running as root (Linux only)
+    // Keep settings tests away from the user's preferences and launchers.
+    QTemporaryDir profile;
+    if (!profile.isValid())
+        return 1;
+#ifdef Q_OS_LINUX
+    qputenv("XDG_CONFIG_HOME", (profile.path() + "/config").toUtf8());
+    qputenv("XDG_DATA_HOME", (profile.path() + "/data").toUtf8());
+#endif
     QApplication app(argc, argv);
     
     // Suppress window display during tests (headless testing)

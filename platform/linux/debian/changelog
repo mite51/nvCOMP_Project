@@ -1,0 +1,40 @@
+nvcomp-gui (1.0.0-2) unstable; urgency=medium
+
+  * Bundle nvCOMP 5.3 and CUDA 13 runtime libraries and license notices.
+  * Require the matching CLI package for the GUI's shared runtime files.
+  * Correct desktop launcher and icon installation paths.
+  * Fix settings initialization and isolate desktop integration tests.
+
+ -- nvCOMP Project <support@nvcomp.example.com>  Wed, 30 Sep 2026 16:00:00 +0000
+
+nvcomp-gui (1.0.0-1) unstable; urgency=medium
+
+  * Initial release (Closes: #XXXXXX)
+  * Features:
+    - GPU-accelerated compression with CUDA support
+    - Qt6 graphical user interface
+    - Command-line interface included
+    - Multi-volume support for large files (2.5GB default)
+    - Folder/directory compression
+    - Desktop integration (MIME types, file associations)
+    - File manager context menu support (Nautilus, Nemo)
+    - Automatic GPU/CPU fallback
+  * Supported algorithms:
+    - LZ4 (fast, good ratio)
+    - Zstd (best compression ratio)
+    - Snappy (fastest)
+    - GDeflate, ANS, Bitcomp (GPU-only)
+  * Platform support:
+    - Ubuntu 20.04 LTS, 22.04 LTS, 24.04 LTS
+    - Debian 11 (Bullseye), 12 (Bookworm)
+  * Dependencies:
+    - Qt6 (6.2 or higher)
+    - CUDA Toolkit 11.0+ (optional, recommended)
+    - Standard C++ libraries
+  * Documentation:
+    - User manual included
+    - Man pages for GUI and CLI
+    - Example usage and tutorials
+
+ -- nvCOMP Project <support@nvcomp.example.com>  Fri, 19 Dec 2025 12:00:00 +0000
+

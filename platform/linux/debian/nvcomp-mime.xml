@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  
+  <!-- LZ4 Compressed Files -->
+  <mime-type type="application/x-lz4">
+    <comment>LZ4 compressed file</comment>
+    <comment xml:lang="en">LZ4 compressed file</comment>
+    <icon name="application-x-lz4"/>
+    <glob pattern="*.lz4"/>
+    <glob pattern="*.vol*.lz4"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- Zstandard Compressed Files -->
+  <mime-type type="application/x-zstd">
+    <comment>Zstandard compressed file</comment>
+    <comment xml:lang="en">Zstandard compressed file</comment>
+    <icon name="application-x-zstd"/>
+    <glob pattern="*.zst"/>
+    <glob pattern="*.zstd"/>
+    <glob pattern="*.vol*.zst"/>
+    <glob pattern="*.vol*.zstd"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- Snappy Compressed Files -->
+  <mime-type type="application/x-snappy">
+    <comment>Snappy compressed file</comment>
+    <comment xml:lang="en">Snappy compressed file</comment>
+    <icon name="application-x-snappy"/>
+    <glob pattern="*.snappy"/>
+    <glob pattern="*.sz"/>
+    <glob pattern="*.vol*.snappy"/>
+    <glob pattern="*.vol*.sz"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- GDeflate Compressed Files (GPU-only) -->
+  <mime-type type="application/x-gdeflate">
+    <comment>GDeflate compressed file</comment>
+    <comment xml:lang="en">GDeflate compressed file (GPU-accelerated)</comment>
+    <icon name="application-x-nvcomp"/>
+    <glob pattern="*.gdeflate"/>
+    <glob pattern="*.vol*.gdeflate"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- ANS Compressed Files (GPU-only) -->
+  <mime-type type="application/x-ans">
+    <comment>ANS compressed file</comment>
+    <comment xml:lang="en">ANS compressed file (GPU-accelerated)</comment>
+    <icon name="application-x-nvcomp"/>
+    <glob pattern="*.ans"/>
+    <glob pattern="*.vol*.ans"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- Bitcomp Compressed Files (GPU-only) -->
+  <mime-type type="application/x-bitcomp">
+    <comment>Bitcomp compressed file</comment>
+    <comment xml:lang="en">Bitcomp compressed file (GPU-accelerated)</comment>
+    <icon name="application-x-nvcomp"/>
+    <glob pattern="*.bitcomp"/>
+    <glob pattern="*.vol*.bitcomp"/>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+  <!-- Generic nvCOMP Archive -->
+  <mime-type type="application/x-nvcomp">
+    <comment>nvCOMP archive</comment>
+    <comment xml:lang="en">nvCOMP compressed archive</comment>
+    <icon name="application-x-nvcomp"/>
+    <glob pattern="*.nvcomp"/>
+    <glob pattern="*.vol*.nvcomp"/>
+    <magic priority="50">
+      <match type="string" offset="0" value="NVAR"/>
+      <match type="string" offset="0" value="NVBC"/>
+      <match type="string" offset="0" value="NVVM"/>
+    </magic>
+    <generic-icon name="package-x-generic"/>
+  </mime-type>
+  
+</mime-info>
+
