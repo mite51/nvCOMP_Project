@@ -1,4 +1,5 @@
 #include "nvcomp_core.hpp"
+#include "binary_file_reader.hpp"
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -190,16 +191,10 @@ std::vector<uint8_t> readFile(const std::string& filename) {
 namespace {
 constexpr uint64_t MMAP_THRESHOLD = 16 * 1024 * 1024; // 16 MB
 
-// std::ifstream fallback used by readFileInto() and as last resort on mmap fail.
+// Bulk binary fallback used by readFileInto() and on mmap failure.
 void readFileIntoStream(const fs::path& path, uint8_t* dst, uint64_t size) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Failed to open input file: " + path.string());
-    }
-    if (size == 0) return;
-    if (!file.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(size))) {
-        throw std::runtime_error("Failed to read file: " + path.string());
-    }
+    BinaryFileReader file(path);
+    file.read(dst, size);
 }
 } // namespace
 

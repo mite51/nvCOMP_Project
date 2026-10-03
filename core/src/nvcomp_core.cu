@@ -1,5 +1,6 @@
 #include "nvcomp_core.hpp"
 #include "cuda_buffers.hpp"
+#include "compression_workspace.hpp"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -34,6 +35,7 @@
 #include "nvcomp/ans.hpp"
 #include "nvcomp/bitcomp.hpp"
 #include "nvcomp/nvcompManagerFactory.hpp"
+#include "binary_file_reader.hpp"
 
 using namespace nvcomp;
 
@@ -58,6 +60,22 @@ namespace fs = std::filesystem;
     } while (0)
 
 namespace nvcomp_core {
+
+void clearCompressionBufferCache() {
+    std::unique_ptr<CompressionWorkspace> idle;
+    auto& cache = compressionWorkspaceCache();
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        ++cache.generation; // Also prevent active leases from repopulating it.
+        idle = std::move(cache.idle);
+    }
+}
+
+uint64_t compressionBufferCacheDeviceBytes() {
+    auto& cache = compressionWorkspaceCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    return cache.idle ? cache.idle->deviceBytes() : 0;
+}
 
 // ============================================================================
 // Device helpers
@@ -219,24 +237,25 @@ static size_t subBatchChunksFor(AlgoType algo) {
 
 // Pipelined streaming compressor.
 //
-// Three concurrent actors connected by slot queues (PIPELINE_DEPTH pinned
-// sub-batch slots, each with its own CUDA stream):
+// Four concurrent actors connected by bounded slot queues (PIPELINE_DEPTH
+// pinned sub-batch slots, each with its own CUDA stream):
 //   reader thread : walks `entries`, reads archive bytes from disk straight
 //                   into a free slot's pinned input buffer
 //   GPU (async)   : per slot: H2D -> nvcompBatched*CompressAsync -> chunk
 //                   sizes D2H (event signals completion)
-//   main thread   : submits filled slots, retires the oldest (pack kernel
-//                   compacts chunks, one pinned D2H), appends to the output
-//                   volume, fires progress callbacks
+//   caller thread : submits filled slots and fires progress callbacks
+//   completion    : collects sizes, packs GPU output, downloads completed batches
+//   writer        : appends completed batches to volumes in submission order
+// A single-slot job uses the caller for completion/writing to avoid extra workers.
 // Disk reads, compression kernels, and PCIe transfers of different sub-batches
 // overlap; peak VRAM is ~depth x sub-batch working set instead of ~2.1x volume.
 //
-// Volume layout on disk is byte-identical to the previous implementation:
+// Volume layout is compatible with the previous implementation:
 // sub-batch boundaries are CHUNK_SIZE-aligned within a volume and chunk sizes
 // are appended in order, so the NVBC header + size table + chunk stream are
-// unchanged. Volumes 2..N stream to disk through a placeholder size table that
-// is patched via seekp once the volume completes; volume 1 (multi-volume) is
-// buffered in RAM for the manifest prepend, exactly as before.
+// unchanged. Every volume streams to disk through a placeholder size table.
+// Volume 1 also reserves space for the manifest and metadata; these are patched
+// after all volumes complete, avoiding whole-volume host buffers and copies.
 static void compressGPUBatchedStreaming(AlgoType algo,
                                         const std::vector<ArchiveEntry>& entries,
                                         const std::string& outputFile,
@@ -310,11 +329,14 @@ static void compressGPUBatchedStreaming(AlgoType algo,
     size_t subBytes = chunksPerSub * CHUNK_SIZE;
     size_t depth = std::max<size_t>(1, std::min<uint64_t>(
         PIPELINE_DEPTH, (totalArchiveSize + subBytes - 1) / subBytes));
+    int device = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    CompressionWorkspaceLease lease(device, algo, chunksPerSub, depth, max_out_bytes, temp_bytes);
 
     // Fit the pipeline into free VRAM: shrink depth first, then sub-batch
     // size (temp requirements scale with chunk count). Actual footprint per
     // slot: input (sized for worst-case packed reuse) + strided output + temp.
-    {
+    if (!lease.hit) {
         size_t freeMem = 0, totalMem = 0;
         if (cudaMemGetInfo(&freeMem, &totalMem) == cudaSuccess) {
             const uint64_t slack = 256ull << 20;
@@ -346,25 +368,21 @@ static void compressGPUBatchedStreaming(AlgoType algo,
     const size_t maxPackedBytes = max_out_bytes * chunksPerSub;
 
     // ---- pipeline slots -----------------------------------------------------
-    struct Slot {
-        PinnedBuffer h_in;         // sub-batch input, filled by the reader
-        PinnedBuffer h_out;        // packed compressed output
-        PinnedBuffer h_sizes;      // per-chunk compressed sizes (D2H)
-        PinnedBuffer h_offsets;    // per-chunk packed offsets (H2D)
-        DeviceBuffer d_in;         // input; reused as pack destination
-        DeviceBuffer d_out;        // worst-case strided compressed output
-        DeviceBuffer d_temp;
-        DeviceBuffer d_in_ptrs, d_in_sizes, d_out_ptrs, d_out_sizes, d_offsets;
-        std::unique_ptr<CudaStream> stream;
-        std::unique_ptr<CudaEvent> computeDone;
-        bool defaultSizes = true;  // d_in_sizes holds all-CHUNK_SIZE values
-        // descriptor of the filled sub-batch
-        size_t bytes = 0;
-        size_t volumeIdx = 0;
-        bool lastInVolume = false;
-    };
-    std::vector<Slot> slots(depth);
+    using Slot = CompressionSlot;
+    if (!lease.workspace) {
+        lease.workspace = std::make_unique<CompressionWorkspace>();
+        auto& w = *lease.workspace;
+        w.device = device; w.algorithm = algo; w.chunks = chunksPerSub;
+        w.depth = depth; w.maxOutput = max_out_bytes; w.scratch = temp_bytes;
+        w.slots.resize(depth);
+    }
+    auto& slots = lease.workspace->slots;
     for (auto& s : slots) {
+        s.bytes = s.volumeIdx = s.packedBytes = 0;
+        s.lastInVolume = false;
+        // Pointer tables remain valid on a cache hit. Preserve defaultSizes:
+        // submitSlot restores full-chunk sizes after any previous short tail.
+        if (lease.hit) continue;
         // d_in doubles as the pack destination, so size it for the worst-case
         // packed output (slightly larger than the input for incompressible data).
         s.h_in.reserve(subBytes);
@@ -399,12 +417,28 @@ static void compressGPUBatchedStreaming(AlgoType algo,
 
     // ---- reader thread <-> main thread queues -------------------------------
     std::mutex mtx;
-    std::condition_variable cvFree, cvFilled;
-    std::deque<size_t> freeSlots, filledSlots;
+    std::condition_variable cvFree, cvFilled, cvSubmitted, cvReady;
+    std::deque<size_t> freeSlots, filledSlots, submittedSlots, readySlots;
     for (size_t i = 0; i < depth; i++) freeSlots.push_back(i);
-    bool readerDone = false;
+    bool readerDone = false, submitDone = false, completionDone = false, writerDone = false;
     std::atomic<bool> abortFlag{false};
-    std::exception_ptr readerError;
+    std::exception_ptr pipelineError;
+    uint64_t progressBytes = 0;
+    size_t progressBatchBytes = 0;
+    auto wakeAll = [&]() {
+        cvFree.notify_all();
+        cvFilled.notify_all();
+        cvSubmitted.notify_all();
+        cvReady.notify_all();
+    };
+    auto recordFailure = [&](std::exception_ptr error) {
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (!pipelineError) pipelineError = error;
+            abortFlag.store(true);
+        }
+        wakeAll();
+    };
 
     auto readerFn = [&]() {
         try {
@@ -476,17 +510,11 @@ static void compressGPUBatchedStreaming(AlgoType algo,
                     return;
                 }
                 // File spans slots/volumes: stream it.
-                std::ifstream f(e.filePath, std::ios::binary);
-                if (!f.is_open()) {
-                    throw std::runtime_error("Failed to open input file: " + e.filePath.string());
-                }
+                BinaryFileReader f(e.filePath);
                 uint64_t remaining = e.fileSize;
                 while (remaining > 0) {
                     take = reserveSpan(remaining, &dst);
-                    if (!f.read(reinterpret_cast<char*>(dst),
-                                static_cast<std::streamsize>(take))) {
-                        throw std::runtime_error("Failed to read file: " + e.filePath.string());
-                    }
+                    f.read(dst, take);
                     remaining -= take;
                     commitSpan(take);
                 }
@@ -518,8 +546,7 @@ static void compressGPUBatchedStreaming(AlgoType algo,
             // The archive stream ends exactly at the last volume boundary, so
             // the final emitSlot(volEnd=true) already fired inside commitSpan.
         } catch (...) {
-            readerError = std::current_exception();
-            abortFlag.store(true);
+            recordFailure(std::current_exception());
         }
         {
             std::lock_guard<std::mutex> lk(mtx);
@@ -571,10 +598,10 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         CUDA_CHECK(cudaEventRecord(*s.computeDone, st));
     };
 
-    // ---- writer state (main thread) -----------------------------------------
+    // ---- writer state (owned by one thread until it joins) ------------------
     std::vector<VolumeMetadata> volumeMetadata;
-    std::vector<uint64_t> volume1Sizes;   // multi-volume: volume 1 buffered in RAM
-    std::vector<uint8_t> volume1Data;
+    const uint64_t manifestBytes = multiVolume
+        ? sizeof(VolumeManifest) + sizeof(VolumeMetadata) * volumeCount : 0;
     std::ofstream volFile;
     std::vector<uint64_t> volSizeTable;
     size_t volExpectedChunks = 0;
@@ -600,11 +627,6 @@ static void compressGPUBatchedStreaming(AlgoType algo,
     auto beginVolume = [&](size_t vol) {
         curWriteVol = vol;
         volExpectedChunks = (volBytes(vol) + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        if (multiVolume && vol == 0) {
-            volume1Sizes.clear();
-            volume1Data.clear();
-            return;
-        }
         std::string name = multiVolume ? generateVolumeFilename(outputFile, vol + 1)
                                        : outputFile;
         volFile.open(fs::path(name), std::ios::binary | std::ios::trunc);
@@ -612,6 +634,14 @@ static void compressGPUBatchedStreaming(AlgoType algo,
             throw std::runtime_error("Failed to create output file: " + name);
         }
         createdFiles.push_back(name);
+        if (multiVolume && vol == 0) {
+            // Invalid until finalization succeeds. Reserve the exact prefix size.
+            VolumeManifest placeholder{};
+            volFile.write(reinterpret_cast<const char*>(&placeholder), sizeof(placeholder));
+            std::vector<VolumeMetadata> zeros(volumeCount);
+            volFile.write(reinterpret_cast<const char*>(zeros.data()),
+                          sizeof(VolumeMetadata) * zeros.size());
+        }
         BatchedHeader h = makeHeader(vol);
         volFile.write(reinterpret_cast<const char*>(&h), sizeof(h));
         // Placeholder size table, patched when the volume completes.
@@ -627,20 +657,19 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         meta.volumeIndex = vol + 1;
         meta.uncompressedOffset = uncompressedOffset;
         meta.uncompressedSize = volBytes(vol);
-        if (multiVolume && vol == 0) {
-            meta.compressedSize = sizeof(BatchedHeader)
-                + sizeof(uint64_t) * volume1Sizes.size() + volume1Data.size();
-        } else {
+        const uint64_t prefix = (multiVolume && vol == 0) ? manifestBytes : 0;
+        {
             if (volSizeTable.size() != volExpectedChunks) {
                 throw std::runtime_error("Internal error: volume chunk count mismatch");
             }
-            volFile.seekp(sizeof(BatchedHeader), std::ios::beg);
+            volFile.seekp(prefix + sizeof(BatchedHeader), std::ios::beg);
             volFile.write(reinterpret_cast<const char*>(volSizeTable.data()),
                           sizeof(uint64_t) * volSizeTable.size());
             volFile.close();
+            if (!volFile) throw std::runtime_error("Failed to finalize output volume");
             uint64_t dataBytes = 0;
             for (uint64_t sz : volSizeTable) dataBytes += sz;
-            meta.compressedSize = sizeof(BatchedHeader)
+            meta.compressedSize = prefix + sizeof(BatchedHeader)
                 + sizeof(uint64_t) * volSizeTable.size() + dataBytes;
         }
         volumeMetadata.push_back(meta);
@@ -654,7 +683,7 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         curWriteVol = SIZE_MAX;
     };
 
-    auto retireSlot = [&](size_t idx) {
+    auto completeSlot = [&](size_t idx) {
         Slot& s = slots[idx];
         CUDA_CHECK(cudaEventSynchronize(*s.computeDone));
         size_t chunk_count = (s.bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -678,14 +707,18 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         CUDA_CHECK(cudaMemcpyAsync(s.h_out.bytes(), s.d_in.bytes(), packed,
                                    cudaMemcpyDeviceToHost, st));
         CUDA_CHECK(cudaStreamSynchronize(st));
+        s.packedBytes = packed;
+    };
 
+    auto writeSlot = [&](size_t idx) {
+        Slot& s = slots[idx];
+        const size_t chunk_count = (s.bytes + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        const size_t* csizes = reinterpret_cast<const size_t*>(s.h_sizes.bytes());
+        const size_t packed = s.packedBytes;
         // Append to the current volume (writer role).
         if (s.volumeIdx != curWriteVol) beginVolume(s.volumeIdx);
         auto writeStart = clock::now();
-        if (multiVolume && s.volumeIdx == 0) {
-            volume1Sizes.insert(volume1Sizes.end(), csizes, csizes + chunk_count);
-            volume1Data.insert(volume1Data.end(), s.h_out.bytes(), s.h_out.bytes() + packed);
-        } else {
+        {
             volSizeTable.insert(volSizeTable.end(), csizes, csizes + chunk_count);
             volFile.write(reinterpret_cast<const char*>(s.h_out.bytes()),
                           static_cast<std::streamsize>(packed));
@@ -698,103 +731,192 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         size_t volIdx = s.volumeIdx;
         writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
 
-        // Slot is free again.
-        {
-            std::lock_guard<std::mutex> lk(mtx);
-            freeSlots.push_back(idx);
-        }
-        cvFree.notify_one();
-
         if (volEnd) {
             auto ws = clock::now();
             finishVolume(volIdx);
             writeSec += std::chrono::duration<double>(clock::now() - ws).count();
         }
+    };
 
+    auto notifyProgress = [&](uint64_t completedBytes, size_t currentBytes) {
         if (callback && totalArchiveSize > 0) {
-            float p = static_cast<float>(bytesRetired) / totalArchiveSize;
+            float p = static_cast<float>(completedBytes) / totalArchiveSize;
             BlockProgressInfo info;
             info.totalBlocks = static_cast<int>(
                 (totalArchiveSize + subBytes - 1) / subBytes);
             info.completedBlocks = static_cast<int>(
-                (bytesRetired + subBytes - 1) / subBytes);
+                (completedBytes + subBytes - 1) / subBytes);
             info.currentBlock = info.completedBlocks > 0 ? info.completedBlocks - 1 : 0;
-            info.currentBlockSize = s.bytes;
+            info.currentBlockSize = currentBytes;
             info.overallProgress = p * 0.75f;
             info.currentBlockProgress = 1.0f;
             double elapsed = std::chrono::duration<double>(clock::now() - opStart).count();
             info.throughputMBps = elapsed > 0
-                ? (bytesRetired / (1024.0 * 1024.0)) / elapsed : 0.0;
+                ? (completedBytes / (1024.0 * 1024.0)) / elapsed : 0.0;
             info.stage = "compressing";
             callback(info);
         }
     };
 
     // ---- pump ----------------------------------------------------------------
-    std::thread reader(readerFn);
-    std::deque<size_t> inFlight;
+    const bool parallelPipeline = depth > 1;
+    std::thread reader, completion, writer;
     auto pumpStart = clock::now();
     try {
-        while (true) {
-            size_t idx = SIZE_MAX;
-            {
-                std::unique_lock<std::mutex> lk(mtx);
-                cvFilled.wait(lk, [&] {
-                    return !filledSlots.empty() || readerDone || abortFlag.load();
-                });
-                if (abortFlag.load() && filledSlots.empty()) break;
-                if (!filledSlots.empty()) {
+        reader = std::thread(readerFn);
+        if (parallelPipeline) {
+            completion = std::thread([&] {
+                try {
+                    // CUDA device selection is per host thread. Honor the caller's
+                    // device rather than assuming the worker's default device 0.
+                    CUDA_CHECK(cudaSetDevice(device));
+                    while (true) {
+                        size_t idx;
+                        {
+                            std::unique_lock<std::mutex> lk(mtx);
+                            cvSubmitted.wait(lk, [&] {
+                                return abortFlag.load() || !submittedSlots.empty() || submitDone;
+                            });
+                            if (abortFlag.load()) break;
+                            if (submittedSlots.empty()) break;
+                            idx = submittedSlots.front();
+                            submittedSlots.pop_front();
+                        }
+                        completeSlot(idx);
+                        {
+                            std::lock_guard<std::mutex> lk(mtx);
+                            readySlots.push_back(idx);
+                        }
+                        cvReady.notify_one();
+                    }
+                } catch (...) { recordFailure(std::current_exception()); }
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    completionDone = true;
+                }
+                cvReady.notify_all();
+            });
+            writer = std::thread([&] {
+                try {
+                    while (true) {
+                        size_t idx;
+                        {
+                            std::unique_lock<std::mutex> lk(mtx);
+                            cvReady.wait(lk, [&] {
+                                return abortFlag.load() || !readySlots.empty() || completionDone;
+                            });
+                            if (abortFlag.load()) break;
+                            if (readySlots.empty()) break;
+                            idx = readySlots.front();
+                            readySlots.pop_front();
+                        }
+                        writeSlot(idx);
+                        {
+                            std::lock_guard<std::mutex> lk(mtx);
+                            // Publish progress before releasing this slot; the
+                            // reader can immediately change its descriptor.
+                            progressBytes = bytesRetired;
+                            progressBatchBytes = slots[idx].bytes;
+                            freeSlots.push_back(idx);
+                        }
+                        cvFree.notify_one();
+                        cvFilled.notify_one();
+                    }
+                } catch (...) { recordFailure(std::current_exception()); }
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    writerDone = true;
+                }
+                cvFilled.notify_all();
+            });
+            uint64_t notifiedBytes = 0;
+            while (true) {
+                size_t idx = SIZE_MAX, currentBytes = 0;
+                uint64_t completedBytes = 0;
+                bool done = false;
+                {
+                    std::unique_lock<std::mutex> lk(mtx);
+                    cvFilled.wait(lk, [&] {
+                        return abortFlag.load() || !filledSlots.empty() || writerDone
+                            || (readerDone && !submitDone) || progressBytes != notifiedBytes;
+                    });
+                    if (abortFlag.load()) break;
+                    completedBytes = progressBytes;
+                    currentBytes = progressBatchBytes;
+                    done = writerDone;
+                    if (!filledSlots.empty()) {
+                        idx = filledSlots.front();
+                        filledSlots.pop_front();
+                    } else if (readerDone && !submitDone) {
+                        submitDone = true;
+                        cvSubmitted.notify_all();
+                    }
+                }
+                // Preserve caller-thread callback delivery, with no queue lock held.
+                if (completedBytes != notifiedBytes) {
+                    notifiedBytes = completedBytes;
+                    notifyProgress(completedBytes, currentBytes);
+                }
+                if (done) break;
+                if (idx != SIZE_MAX) {
+                    submitSlot(slots[idx]);
+                    {
+                        std::lock_guard<std::mutex> lk(mtx);
+                        submittedSlots.push_back(idx);
+                    }
+                    cvSubmitted.notify_one();
+                }
+            }
+        } else {
+            while (true) {
+                size_t idx;
+                {
+                    std::unique_lock<std::mutex> lk(mtx);
+                    cvFilled.wait(lk, [&] { return abortFlag.load() || !filledSlots.empty() || readerDone; });
+                    if (abortFlag.load() || filledSlots.empty()) break;
                     idx = filledSlots.front();
                     filledSlots.pop_front();
-                } else if (readerDone) {
-                    break;
                 }
-            }
-            if (idx != SIZE_MAX) {
                 submitSlot(slots[idx]);
-                inFlight.push_back(idx);
-                if (inFlight.size() >= depth) {
-                    retireSlot(inFlight.front());
-                    inFlight.pop_front();
+                completeSlot(idx);
+                writeSlot(idx);
+                notifyProgress(bytesRetired, slots[idx].bytes);
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    freeSlots.push_back(idx);
                 }
+                cvFree.notify_one();
             }
-        }
-        while (!inFlight.empty()) {
-            retireSlot(inFlight.front());
-            inFlight.pop_front();
         }
     } catch (...) {
-        abortFlag.store(true);
-        cvFree.notify_all();
-        cvFilled.notify_all();
-        reader.join();
-        if (volFile.is_open()) volFile.close();
-        for (const auto& f : createdFiles) {
-            std::error_code ec;
-            fs::remove(fs::path(f), ec);
-        }
-        throw;
+        recordFailure(std::current_exception());
     }
-    reader.join();
-    if (readerError) {
+    if (reader.joinable()) reader.join();
+    if (completion.joinable()) completion.join();
+    if (writer.joinable()) writer.join();
+    if (pipelineError) {
+        // An aborted slot may still have transfers using pinned host memory.
+        // Drain those operations before buffers are destroyed or files removed.
+        for (auto& s : slots) cudaStreamSynchronize(*s.stream);
         if (volFile.is_open()) volFile.close();
         for (const auto& f : createdFiles) {
             std::error_code ec;
             fs::remove(fs::path(f), ec);
         }
-        std::rethrow_exception(readerError);
+        std::rethrow_exception(pipelineError);
     }
     if (stats) {
         double pumpSec = std::chrono::duration<double>(clock::now() - pumpStart).count();
-        // Disk reads overlap compression in this pipeline, so "compute" covers
-        // the whole overlapped fill+compress region; write time is separate.
-        stats->computeSec += std::max(0.0, pumpSec - writeSec);
+        // Worker-stage durations overlap. Compute is the whole pipeline span
+        // for parallel jobs; writeSec reports writer work within that span.
+        stats->computeSec += parallelPipeline ? pumpSec : std::max(0.0, pumpSec - writeSec);
         stats->writeSec += writeSec;
     }
 
-    // ---- multi-volume: write volume 1 (manifest + metadata + NVBC) last ------
+    // ---- multi-volume: patch only the reserved manifest/metadata prefix -----
     auto writeStart = clock::now();
-    if (multiVolume) {
+    try {
+      if (multiVolume) {
         VolumeManifest manifest;
         manifest.magic = VOLUME_MAGIC;
         manifest.version = VOLUME_VERSION;
@@ -804,33 +926,21 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         manifest.totalUncompressedSize = totalArchiveSize;
         manifest.reserved = 0;
 
-        std::vector<uint8_t> volume1OnDisk;
-        BatchedHeader h1 = makeHeader(0);
-        volume1OnDisk.reserve(sizeof(VolumeManifest)
-                              + sizeof(VolumeMetadata) * volumeMetadata.size()
-                              + sizeof(BatchedHeader)
-                              + sizeof(uint64_t) * volume1Sizes.size()
-                              + volume1Data.size());
-        const uint8_t* mb = reinterpret_cast<const uint8_t*>(&manifest);
-        volume1OnDisk.insert(volume1OnDisk.end(), mb, mb + sizeof(VolumeManifest));
-        const uint8_t* vmb = reinterpret_cast<const uint8_t*>(volumeMetadata.data());
-        volume1OnDisk.insert(volume1OnDisk.end(), vmb,
-                             vmb + sizeof(VolumeMetadata) * volumeMetadata.size());
-        const uint8_t* hb = reinterpret_cast<const uint8_t*>(&h1);
-        volume1OnDisk.insert(volume1OnDisk.end(), hb, hb + sizeof(BatchedHeader));
-        const uint8_t* sb = reinterpret_cast<const uint8_t*>(volume1Sizes.data());
-        volume1OnDisk.insert(volume1OnDisk.end(), sb,
-                             sb + sizeof(uint64_t) * volume1Sizes.size());
-        volume1OnDisk.insert(volume1OnDisk.end(),
-                             volume1Data.begin(), volume1Data.end());
-
-        // Volume 1's on-disk size includes the manifest + metadata prepend.
-        totalCompressedBytes = totalCompressedBytes
-            - volumeMetadata[0].compressedSize + volume1OnDisk.size();
-        volumeMetadata[0].compressedSize = volume1OnDisk.size();
-
         std::string firstVolumeFile = generateVolumeFilename(outputFile, 1);
-        writeFile(firstVolumeFile, volume1OnDisk.data(), volume1OnDisk.size());
+        std::fstream first(fs::path(firstVolumeFile), std::ios::binary | std::ios::in | std::ios::out);
+        if (!first.is_open()) throw std::runtime_error("Failed to reopen first output volume");
+        first.write(reinterpret_cast<const char*>(&manifest), sizeof(manifest));
+        first.write(reinterpret_cast<const char*>(volumeMetadata.data()),
+                    sizeof(VolumeMetadata) * volumeMetadata.size());
+        first.close();
+        if (!first) throw std::runtime_error("Failed to finalize volume manifest");
+      }
+    } catch (...) {
+        for (const auto& f : createdFiles) {
+            std::error_code ec;
+            fs::remove(fs::path(f), ec);
+        }
+        throw;
     }
     if (stats) {
         stats->writeSec += std::chrono::duration<double>(clock::now() - writeStart).count();
@@ -851,6 +961,7 @@ static void compressGPUBatchedStreaming(AlgoType algo,
         callback(info);
     }
 
+    lease.retainSuccessful();
     if (multiVolume) {
         // Always-on result summary (matches the previous pipeline's output).
         double totalSec = std::chrono::duration<double>(clock::now() - opStart).count();

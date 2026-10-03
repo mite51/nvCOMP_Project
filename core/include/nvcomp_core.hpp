@@ -64,9 +64,10 @@ using ProgressCallback = std::function<void(const BlockProgressInfo&)>;
  * Phases:
  *   readSec    - reading input file(s) from disk and assembling the in-memory archive
  *   prepareSec - allocating GPU buffers, host->device copies, scratch setup
- *   computeSec - actual compression/decompression kernels (cudaStreamSynchronize wall time)
+ *   computeSec - processing wall time; streaming paths include overlapped reads,
+ *                transfers and waits, not just GPU kernel execution
  *   writeSec   - writing the output file(s) to disk
- *   totalSec   - sum of the above
+ *   totalSec   - operation wall time (individual phases may overlap or omit setup)
  *
  * Throughput is computed against the uncompressed (input) size.
  * For decompression, inputBytes is the uncompressed output size and outputBytes is the
@@ -347,6 +348,14 @@ NVCOMP_CORE_API void listArchiveEntries(
 // ============================================================================
 // GPU Compression (Batched API)
 // ============================================================================
+
+// NVCOMP_REUSE_BUFFERS=1 (set before starting jobs) enables cross-job reuse for
+// batched compression. At most one idle workspace is retained process-wide,
+// capped at 4 GiB device + 1 GiB host memory. Default: release after each job.
+// Call before CUDA device reset or library unload, or when the memory is needed
+// elsewhere. Active jobs keep their buffers but will not repopulate this cache.
+NVCOMP_CORE_API void clearCompressionBufferCache();
+NVCOMP_CORE_API uint64_t compressionBufferCacheDeviceBytes(); // idle allocations only
 
 NVCOMP_CORE_API void compressGPUBatched(AlgoType algo, const std::string& inputPath, 
                                          const std::string& outputFile, uint64_t maxVolumeSize,

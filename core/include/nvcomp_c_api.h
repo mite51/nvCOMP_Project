@@ -67,6 +67,11 @@ typedef enum {
 
 typedef struct nvcomp_operation_t* nvcomp_operation_handle;
 
+/** Release idle batched-compression buffers retained by NVCOMP_REUSE_BUFFERS=1.
+ * Safe during active jobs; call before CUDA reset or unloading this library.
+ * Active jobs retain their own buffers until completion. */
+NVCOMP_C_API nvcomp_error_t nvcomp_clear_compression_buffer_cache(void);
+
 // ============================================================================
 // Compression Statistics
 // ============================================================================

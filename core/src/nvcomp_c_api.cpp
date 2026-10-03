@@ -20,6 +20,19 @@
 
 thread_local std::string g_last_error;
 
+nvcomp_error_t nvcomp_clear_compression_buffer_cache(void) {
+    try {
+        nvcomp_core::clearCompressionBufferCache();
+        return NVCOMP_SUCCESS;
+    } catch (const std::exception& e) {
+        g_last_error = e.what();
+        return NVCOMP_ERROR_UNKNOWN;
+    } catch (...) {
+        g_last_error = "Failed to clear compression buffer cache";
+        return NVCOMP_ERROR_UNKNOWN;
+    }
+}
+
 // ============================================================================
 // Operation Handle Implementation
 // ============================================================================

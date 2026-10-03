@@ -14,7 +14,7 @@ A cross-platform compression toolkit with both command-line and graphical interf
   - **Manager API** for GDeflate, ANS, Bitcomp: GPU-only, high-performance
   
 - **Multi-Volume Support**: Automatically splits large archives into manageable volumes
-  - Default 2.5GB volumes (safe for 8GB VRAM GPUs)
+  - Default 2.5 GiB logical volumes; GPU memory requirements depend on the codec
   - Customizable volume sizes or unlimited single-file mode
   - Automatic volume detection and reassembly during decompression
   - Smart GPU memory checking with automatic CPU fallback
@@ -24,7 +24,8 @@ A cross-platform compression toolkit with both command-line and graphical interf
 - **Automatic CPU Fallback**: Seamlessly falls back to CPU compression when CUDA is not available
 - **Cross-Compatibility**: GPU-compressed files (LZ4/Snappy/Zstd) can be decompressed on CPU and vice versa
 - **Cross-Platform Path Handling**: Automatically handles Windows/Linux filesystem differences
-- **High Performance**: Leverages CUDA for GPU acceleration with typical 10-100x speedup
+- **Measured Performance**: GPU acceleration with workload-dependent tradeoffs; see the
+  [session summary](bench/SESSION_SUMMARY.md) for same-machine results
 - **Cross-Platform**: Works on Windows and Linux
 
 ## Supported Algorithms
@@ -42,6 +43,16 @@ These algorithms use the nvCOMP Batched API which produces raw compressed data c
 - **Bitcomp**: Lossless compression for numerical data
 
 These algorithms use the nvCOMP Manager API which produces nvCOMP container format and only work GPU-to-GPU.
+
+**GDeflate memory and interoperability:** the current Manager path is not bounded
+like the LZ4/Snappy/Zstd pipelines. On the measured nvCOMP 5.3 / RTX 4090 setup,
+compression allocations are approximately 10.5 times the uncompressed volume
+size. Default 2.5 GiB volumes fail on this 24 GiB GPU; `--volume-size 512MB`
+completed the 6 GiB test. These measurements are not universal memory guarantees.
+Existing `.gdeflate` archives are not DirectStorage streams. An investigation
+verified that low-level 64 KiB GDeflate chunks can be repackaged for DirectStorage
+without recompression. This is not an archive export feature. See the
+[session summary](bench/SESSION_SUMMARY.md) for the findings and limitations.
 
 ## Shell Integration
 
@@ -199,10 +210,9 @@ CUDA Toolkit 13.0.88, MSVC 19.38, Qt 6.8.0, Release configuration.
 - Linux compilation, packaging and POSIX metadata checks remain unverified here:
   the available Ubuntu environment lacks a C++ compiler and CUDA Toolkit.
 
-For a repeatable comparison on real data, use the
-[Silesia corpus benchmark](bench/SILESIA.md). It tests all six algorithms on 12
-verified corpus files and the combined folder, recording speed, compressed size
-and byte-exact extraction results for both SDK builds.
+The [session summary](bench/SESSION_SUMMARY.md) records the subsequent Silesia
+and large-file performance investigations. Benchmark harnesses and generated
+data were removed when the session was consolidated.
 
 ## Usage
 
@@ -270,7 +280,7 @@ nvcomp_cli -l archive.zstd zstd
 For large files or directories, the tool automatically creates multiple volume files to avoid GPU memory limitations:
 
 ```bash
-# Compress with default 2.5GB volumes (recommended for 8GB VRAM GPUs)
+# Compress with default 2.5GB volumes (memory requirements depend on codec)
 nvcomp_cli -c large_dataset/ output.lz4 lz4
 # Creates: output.vol001.lz4, output.vol002.lz4, output.vol003.lz4, ...
 
@@ -572,9 +582,12 @@ For large archives, the tool automatically splits into multiple volumes:
 - **Decompression**: All volumes must be present in the same directory
   - Tool automatically detects and loads all volumes
   - Reassembles original archive before extraction
-- **Memory Safety**: Default 2.5GB volume size ensures compatibility with 8GB VRAM GPUs
-  - GPU memory requirement: ~2.1x volume size (input + output + temp buffers)
-  - Automatic CPU fallback if insufficient GPU memory detected
+- **Memory Requirements**: Logical volume size is not a GPU memory budget
+  - Batched LZ4/Snappy/Zstd use bounded sub-batches
+  - GDeflate Manager compression used approximately 10.5x volume size in the
+    [measured 5.3 configuration](bench/SESSION_SUMMARY.md); other Manager codecs
+    need their own workspace measurements
+  - CPU fallback is available only for the cross-compatible algorithms
 
 ## Testing
 
@@ -727,26 +740,41 @@ This project uses both to provide the best of both worlds.
 
 ## Performance
 
-Typical performance on NVIDIA A100:
+Measured on Windows 11, RTX 4090, i9-12900K, nvCOMP 5.3.0.16 and zstd 1.5.7.
+These are medians of three measured application runs after warm-up, including startup and I/O;
+the CPU folder test includes tar packing. Writes are buffered, not timed to
+durable storage completion. The 6 GiB nvCOMP run uses 512 MiB volumes.
+These results include bulk reads, separate pipeline workers and first-volume
+streaming. See the [session summary](bench/SESSION_SUMMARY.md) for the individual
+comparisons, ranges and measurement conditions.
 
-| Algorithm | Compression | Decompression | Ratio |
-|-----------|-------------|---------------|-------|
-| LZ4       | 20-40 GB/s  | 40-80 GB/s    | 2-3x  |
-| Snappy    | 30-50 GB/s  | 50-90 GB/s    | 1.5-2x|
-| Zstd      | 5-15 GB/s   | 10-30 GB/s    | 3-5x  |
-| GDeflate  | 10-20 GB/s  | 20-40 GB/s    | 2-4x  |
-| ANS       | 5-10 GB/s   | 10-20 GB/s    | 2-3x  |
-| Bitcomp   | 15-25 GB/s  | 30-50 GB/s    | 2-10x*|
+| Input | GPU Zstd compress | CPU zstd -T0 -1 compress | GPU ratio | CPU ratio |
+|---|---:|---:|---:|---:|
+| Silesia folder (202 MiB) | 0.418 s | 0.234 s | 2.870x | 2.891x |
+| Generated mixed file (6 GiB) | 2.510 s | 2.014 s | 1.656x | 1.673x |
 
-*Bitcomp ratio depends heavily on data type (best for numerical data)
-
-CPU performance is typically 10-100x slower depending on CPU and data.
+Multithreaded zstd is faster here at nearly matched ratio. GPU Zstd uses fewer
+CPU seconds. See the [session summary](bench/SESSION_SUMMARY.md) for 7-Zip,
+other levels, memory, verification and limitations.
+Kernel throughput and the historical stock-zip comparison do not establish a
+general application speedup over CPU compressors.
 
 ### Pipelined GPU Engine (LZ4/Snappy/Zstd)
 
 GPU batched compression and decompression run through a pipelined sub-batch
 engine: disk reads, PCIe transfers, and GPU kernels for different sub-batches
 overlap on rotating CUDA streams with pinned staging buffers.
+
+Compression uses separate reader, GPU submission, completion and ordered writer
+stages, sharing the same bounded slot pool. Single-slot jobs avoid the extra
+completion/writer threads. The maximum remains three slots; higher slot counts
+did not improve the tested workload.
+
+The first volume now streams directly to disk too. Optional
+`NVCOMP_REUSE_BUFFERS=1` retains one bounded workspace between jobs in the same
+process, avoiding repeated GPU and pinned-buffer allocation. It holds memory
+between jobs and provides an explicit release API. See the
+[session summary](bench/SESSION_SUMMARY.md) for configuration and memory limits.
 
 - **Sub-batch size**: 128MB (LZ4/Snappy) or 64MB (Zstd) by default — the
   measured GPU throughput sweet spots. Override with the `NVCOMP_SUBBATCH_MB`
@@ -755,8 +783,8 @@ overlap on rotating CUDA streams with pinned staging buffers.
   depending on algorithm), independent of volume size. The engine shrinks its
   depth and sub-batch size automatically to fit free VRAM.
 - **Multi-volume**: volumes are produced back-to-back by the same pipeline;
-  buffers and streams are reused across volumes, and volumes 2..N stream to
-  disk as they complete.
+  buffers and streams are reused across volumes, and all volumes stream to
+  disk as they complete. The first volume's manifest is patched at the end.
 - **Small archives** (<64MB) decompress on the CPU on purpose: CUDA startup
   costs exceed the decode time at that size.
 
@@ -767,18 +795,24 @@ overlap on rotating CUDA streams with pinned staging buffers.
      few sub-batches (~1–5GB depending on algorithm) regardless of input size,
      and shrinks itself to fit free VRAM automatically
    - GPU-only Manager algorithms (GDeflate/ANS/Bitcomp) still process whole
-     volumes (~2.1x volume size in VRAM) — use `--volume-size` to bound them
+     volumes. GDeflate compression required approximately 10.5x volume size in
+     the measured 5.3 setup; the old generic 2.1x estimate is not sufficient
    - **Automatic Fallback**: insufficient VRAM falls back to CPU for cross-compatible algorithms
    - **Customization**: `--volume-size` controls on-disk volume splitting; `--no-volumes` disables splitting (now safe for batched algorithms even for very large files)
 
 2. **CUDA Version**: This build requires CUDA Toolkit 13.x and pins the CUDA 13
    variant of nvCOMP 5.3.0. CUDA 12 SDK packages are not selected by this build.
 
-3. **Volume Memory**: Each volume must fit in memory during processing. Default 2.5GB volumes are safe for most systems.
+3. **Volume Memory**: Manager codecs need input, worst-case output and workspace
+   simultaneously. Default 2.5 GiB GDeflate volumes failed on the tested 24 GiB
+   GPU; 512 MiB volumes completed the 6 GiB workload. Whole-archive host buffering
+   remains a separate limitation of the Manager path.
 
 4. **File Permissions**: File permissions and attributes are not preserved in archives (only file paths and contents).
 
-5. **Custom Format**: GPU batched compression uses a custom format with metadata. While CPU decompression is supported, it's slower than GPU decompression.
+5. **Custom Format**: GPU batched compression uses a custom format with metadata.
+   CPU decompression is supported; relative speed depends on workload size,
+   startup costs and I/O.
 
 6. **Cascaded Algorithm**: Not included in this implementation (removed from nvCOMP reference examples due to text data incompatibility).
 
@@ -843,9 +877,10 @@ If you see this during decompression:
 ### Large Archive Compression
 
 For very large datasets:
-- Use default 2.5GB volumes (recommended for 8GB VRAM GPUs)
-- Use `--volume-size 1GB` for GPUs with 6GB or less VRAM
-- Use `--volume-size 5GB` for high-end GPUs with 16GB+ VRAM
+- For LZ4/Snappy/Zstd, the bounded GPU pipeline sizes itself to available memory
+- For GDeflate, choose a smaller volume explicitly; `--volume-size 512MB`
+  completed the 6 GiB test on the 24 GiB RTX 4090
+- Do not use the old generic 2.1x volume estimate to size Manager compression
 - CPU mode with volumes works too: `nvcomp_cli -c huge_data/ output.lz4 lz4 --cpu`
 
 ## Dependencies
@@ -919,7 +954,8 @@ Contributions welcome! Please ensure:
 
 ### Version 3.0.0 - Multi-Volume Support
 - **NEW**: 🎉 Multi-volume support for large files and archives
-  - Default 2.5GB volumes (safe for 8GB VRAM GPUs)
+  - Default 2.5GB logical volumes (later measurements found these unsafe for
+    GDeflate on the tested 24 GiB GPU; see the current memory guidance above)
   - Automatic volume splitting and reassembly
   - Customizable volume sizes: `--volume-size 1GB`, `--volume-size 5GB`, etc.
   - Option to disable splitting: `--no-volumes`
@@ -927,7 +963,7 @@ Contributions welcome! Please ensure:
 - **NEW**: Intelligent GPU memory management
   - Automatic detection of available GPU memory
   - Smart fallback to CPU when GPU memory insufficient
-  - Memory requirement calculation (~2.1x volume size)
+  - Original memory estimate (~2.1x volume size; insufficient for GDeflate compression)
 - **NEW**: Volume manifest format with metadata
   - Stores volume count, algorithm, sizes, and offsets
   - Auto-detects multi-volume archives during decompression

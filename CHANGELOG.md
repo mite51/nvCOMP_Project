@@ -16,13 +16,38 @@ All notable changes to the nvCOMP CLI project will be documented in this file.
   and preservation of file contents and modification times.
 - Build the Windows installer using the current GUI output directory, so a
   fresh build cannot accidentally package SDK DLLs from an older build_gui tree.
+- Use bulk binary reads for streaming compression and the shared small-file/mmap
+  fallback. On the measured Windows 6 GiB workload, median GPU Zstd time fell
+  from 8.687 to 5.651 s in the isolated reader comparison.
+- Separate GPU submission, completion and ordered output writing while keeping
+  the three-slot memory bound and caller-thread callbacks. Median time fell
+  from 5.575 to 2.776 s in the worker comparison.
+- Stream the first archive volume directly to disk and patch its manifest after
+  completion. Median time fell from 2.860 to 2.510 s and sampled peak host RAM
+  from 1.10 to 0.50 GiB in that comparison. Archive versions remain unchanged.
+- Consolidate `bench/` into [one session summary](bench/SESSION_SUMMARY.md),
+  removing benchmark scripts, generated datasets, raw dumps and redundant
+  reports. Remove investigation-only prototypes, profiling hooks and slot-count
+  tuning: 6/8/12 slots did not improve the tested 64 MiB-batch workload.
+- Correct performance and GDeflate memory guidance. CPU `zstd -T0 -1` still
+  outperformed the optimized GPU application on the measured workloads.
 
 ### Added
 
-- A repeatable Silesia corpus benchmark (`bench/silesia.py`) comparing two CLI
-  builds on 12 verified real-world files and the combined folder. Records
-  warm-ups, repeated timings, compression ratios, process failures and SHA-256
-  extraction checks; see `bench/SILESIA.md` for usage and methodology.
+- Opt-in cross-job buffer reuse with `NVCOMP_REUSE_BUFFERS=1`, retaining at most
+  one matching workspace (4 GiB device / 1 GiB host cap). Repeated Silesia C API
+  calls improved from 0.244 to 0.116 s; large-file differences were inconclusive.
+  Default behavior releases buffers after each job. C/C++ cache-release APIs
+  allow applications to return idle memory before CUDA reset or library unload.
+- Worker regression coverage for codec round trips, concurrent jobs, caller
+  callbacks, read/write/callback/finalization failures and buffer-cache release.
+
+### Fixed
+
+- Include the manifest prefix in the first volume's serialized compressed-size
+  field, and check volume/manifest write completion. Failed pipeline jobs join
+  their workers, drain CUDA transfers and remove partial output before returning
+  the first error.
 
 ### Validation
 
@@ -34,6 +59,15 @@ All notable changes to the nvCOMP CLI project will be documented in this file.
   unchanged.
 - Verified packaged SDK hashes, GUI startup and automatic CPU fallback. Linux
   build/runtime validation remains pending. See README for benchmark details.
+- Performance results above come from separate same-machine comparisons, not
+  one cumulative timing run. Benchmark archives were extracted and SHA-256
+  checked; the summary preserves CPU/7-Zip comparisons, GDeflate/DirectStorage
+  findings and unsuccessful experiments. No production GDeflate redesign or
+  DirectStorage exporter was added.
+- After removing the experimental code, the Windows Release rebuild passed
+  20 C API checks and 17 worker round trips with four failure/recovery scenarios.
+  A final 6 GiB CLI compression/extraction round trip matched the recorded
+  SHA-256. These cleanup checks do not replace the historical timing campaigns.
 
 ## [3.4.0] - 2026-07-09
 
@@ -178,6 +212,8 @@ versions (validated by a fixture compatibility gate).
   round-trip verification), `poc/*.cu` micro-benchmarks, and
   `unit_test/test_fixtures.sh` (backward-compat gate against pre-release
   archives).
+  The benchmark scripts were later consolidated into the session summary;
+  the fixture gate now accepts separately supplied `unit_test/fixtures/` data.
 
 #### Changed
 

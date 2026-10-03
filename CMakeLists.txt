@@ -512,6 +512,20 @@ if(BUILD_TESTS)
     # test_c_api reads fixtures (sample.txt, sample_folder/) relative to CWD
     add_test(NAME test_c_api COMMAND test_c_api
              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/unit_test)
+
+    add_executable(test_gpu_workers unit_test/test_gpu_workers.cpp)
+    target_link_libraries(test_gpu_workers PRIVATE nvcomp_core)
+    if(WIN32)
+        add_custom_command(TARGET test_gpu_workers POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvcomp_core> $<TARGET_FILE_DIR:test_gpu_workers>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NVCOMP_PATH}/bin/nvcomp64_5.dll" $<TARGET_FILE_DIR:test_gpu_workers>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${NVCOMP_PATH}/bin/nvcomp_cpu64_5.dll" $<TARGET_FILE_DIR:test_gpu_workers>)
+    else()
+        set_target_properties(test_gpu_workers PROPERTIES BUILD_RPATH "$ORIGIN/../lib;$ORIGIN")
+    endif()
+    add_test(NAME test_gpu_workers COMMAND test_gpu_workers
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/unit_test)
+    set_tests_properties(test_gpu_workers PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
     
     message(STATUS "Test executables configured successfully")
 endif()
